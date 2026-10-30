@@ -81,7 +81,7 @@
 - The index remains `indexing` until changes from the pre-traversal token have been applied transactionally. If catch-up discovers an unscanned folder, the index scans it and performs another catch-up from the new start token before becoming `ready`.
 - Validation: `go test -race ./internal/store ./internal/indexer -count=1` passed. Fake-API tests index more than 2,000 files across short pages, include empty/late folders, long and colliding names, metadata updates, deletes, moves, trashed/shared/out-of-tree items, and assert token-before-traversal order. Restart tests close and reopen SQLite after interruptions at each folder page and catch-up page; atomicity tests prove a failed batch does not advance its cursor or leave partial objects. No Google requests were made.
 - Limitations: Google root ID behavior, actual API pagination/change ordering, account-specific shared-with-me behavior, and the end-to-end OAuth-to-index integration have not been tested against a real account. The `drivefs` and Qt processes still do not invoke the indexer.
-- Git commit: pending.
+- Git commit: `f103e26` (`feat: index My Drive with pagination and catch-up`).
 
 ## Next
 
