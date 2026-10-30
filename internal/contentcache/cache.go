@@ -67,6 +67,30 @@ func New(drive driveapi.API, metadata *store.Store, content *store.ContentStore,
 }
 
 func (c *Cache) Open(ctx context.Context, object domain.Object) (*Handle, error) {
+	return c.open(ctx, object, nil)
+}
+
+// Prefetch downloads and verifies a pinned object while reporting bytes written
+// during this file. The returned handle is closed before this method returns.
+func (c *Cache) Prefetch(ctx context.Context, object domain.Object, progress func(downloaded int64)) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	pinned, err := c.metadata.IsOfflinePinned(ctx, object.ID)
+	if err != nil {
+		return err
+	}
+	if !pinned {
+		return errors.New("object is not covered by an offline pin")
+	}
+	handle, err := c.open(ctx, object, progress)
+	if err != nil {
+		return err
+	}
+	return handle.Close()
+}
+
+func (c *Cache) open(ctx context.Context, object domain.Object, progress func(downloaded int64)) (*Handle, error) {
 	if ctx == nil {
 		return nil, errors.New("context must not be nil")
 	}
@@ -128,7 +152,7 @@ func (c *Cache) Open(ctx context.Context, object domain.Object) (*Handle, error)
 		_ = download.Body.Close()
 		return nil, fmt.Errorf("Drive download length is %d bytes, expected %d", download.ContentLength, before.Size)
 	}
-	staged, stageErr := c.content.StageDownload(ctx, download.Body, before.Size, before.MD5Checksum)
+	staged, stageErr := c.content.StageDownloadProgress(ctx, download.Body, before.Size, before.MD5Checksum, progress)
 	closeErr := download.Body.Close()
 	if stageErr != nil {
 		return nil, fmt.Errorf("stage Drive file download: %w", stageErr)
@@ -147,7 +171,12 @@ func (c *Cache) Open(ctx context.Context, object domain.Object) (*Handle, error)
 		return nil, ErrStaleRemoteVersion
 	}
 
-	if staged.Size <= c.maxBytes {
+	pinned, err := c.metadata.IsOfflinePinned(ctx, object.ID)
+	if err != nil {
+		_ = c.content.DiscardStagedContent(staged)
+		return nil, fmt.Errorf("check offline pin before publishing download: %w", err)
+	}
+	if pinned || staged.Size <= c.maxBytes {
 		if handle, err := c.publishWithinLimit(ctx, object, staged); err == nil {
 			return handle, nil
 		} else if !errors.Is(err, errCacheLimitUnavailable) {
@@ -169,11 +198,15 @@ func (c *Cache) publishWithinLimit(ctx context.Context, object domain.Object, st
 	c.mu.Lock()
 	version, err := func() (domain.ContentVersion, error) {
 		defer c.mu.Unlock()
+		pinned, err := c.metadata.IsOfflinePinned(ctx, object.ID)
+		if err != nil {
+			return domain.ContentVersion{}, err
+		}
 		used, err := c.metadata.CachedContentBytes(ctx)
 		if err != nil {
 			return domain.ContentVersion{}, err
 		}
-		if !fits(used, staged.Size, c.maxBytes) {
+		if !pinned && !fits(used, staged.Size, c.maxBytes) {
 			candidates, err := c.metadata.EvictableCachedVersions(ctx)
 			if err != nil {
 				return domain.ContentVersion{}, err
@@ -206,7 +239,7 @@ func (c *Cache) publishWithinLimit(ctx context.Context, object domain.Object, st
 				delete(c.lastUsed, candidate.ID)
 			}
 		}
-		if !fits(used, staged.Size, c.maxBytes) {
+		if !pinned && !fits(used, staged.Size, c.maxBytes) {
 			return domain.ContentVersion{}, errCacheLimitUnavailable
 		}
 		version, err := c.content.PublishCachedContent(ctx, object.ID, object.DriveVersion, staged)
@@ -362,4 +395,3 @@ func (h *Handle) Close() error {
 	})
 	return h.closeErr
 }
-

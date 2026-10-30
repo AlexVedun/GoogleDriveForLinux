@@ -777,6 +777,7 @@ func (s *ContentStore) removeOrphanFiles(ctx context.Context) (int, error) {
 	}{
 		{path: s.paths.Pending, relative: "pending", filter: generatedContentFileName, keepRef: true},
 		{path: s.paths.EvictableCache, relative: filepath.ToSlash(filepath.Join("cache", "evictable")), filter: generatedContentFileName, keepRef: true},
+		{path: s.paths.Pinned, relative: filepath.ToSlash(filepath.Join("cache", "pinned")), filter: generatedContentFileName, keepRef: true},
 		{path: s.paths.Transient, filter: generatedDownloadFileName},
 	} {
 		entries, err := os.ReadDir(directory.path)
@@ -896,7 +897,10 @@ func (s *ContentStore) pathForVersion(version domain.ContentVersion) (string, er
 	}
 	expected := s.relativeBlobPath(version.ID)
 	if version.Kind == domain.ContentCached {
-		expected = s.relativeCachedBlobPath(version.ID)
+		if !s.isCachedBlobPath(version.ID, version.LocalPath) {
+			return "", errors.New("content version has an invalid path")
+		}
+		return filepath.Join(s.paths.Root, filepath.FromSlash(version.LocalPath)), nil
 	}
 	if version.LocalPath != expected {
 		return "", errors.New("content version has an invalid local path")
@@ -920,8 +924,20 @@ func (s *ContentStore) relativeCachedBlobPath(versionID domain.ContentVersionID)
 	return filepath.ToSlash(filepath.Join("cache", "evictable", string(versionID)+".blob"))
 }
 
+func (s *ContentStore) relativePinnedBlobPath(versionID domain.ContentVersionID) string {
+	return filepath.ToSlash(filepath.Join("cache", "pinned", string(versionID)+".blob"))
+}
+
 func (s *ContentStore) cachedBlobPath(versionID domain.ContentVersionID) string {
 	return filepath.Join(s.paths.EvictableCache, string(versionID)+".blob")
+}
+
+func (s *ContentStore) pinnedBlobPath(versionID domain.ContentVersionID) string {
+	return filepath.Join(s.paths.Pinned, string(versionID)+".blob")
+}
+
+func (s *ContentStore) isCachedBlobPath(versionID domain.ContentVersionID, localPath string) bool {
+	return localPath == s.relativeCachedBlobPath(versionID) || localPath == s.relativePinnedBlobPath(versionID)
 }
 
 func (s *ContentStore) objectLock(objectID domain.ObjectID) *sync.Mutex {
@@ -988,6 +1004,21 @@ func (r *diskReservation) release() {
 type reservedWriter struct {
 	file        io.Writer
 	reservation *diskReservation
+}
+
+type progressWriter struct {
+	writer   io.Writer
+	progress func(downloaded int64)
+	total    int64
+}
+
+func (w *progressWriter) Write(buffer []byte) (int, error) {
+	written, err := w.writer.Write(buffer)
+	w.total += int64(written)
+	if written > 0 {
+		w.progress(w.total)
+	}
+	return written, err
 }
 
 func (w *reservedWriter) Write(buffer []byte) (int, error) {

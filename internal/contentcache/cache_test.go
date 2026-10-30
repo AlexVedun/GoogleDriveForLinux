@@ -246,6 +246,69 @@ func TestCacheEvictionHonorsQuotaAndOpenHandles(t *testing.T) {
 	}
 }
 
+func TestPinManagerDownloadsOutsideCacheLimitAndReportsProgress(t *testing.T) {
+	ctx := context.Background()
+	metadata, content := cacheFixture(t, "object-pinned", "pinned-v1", 3)
+	defer metadata.Close()
+	payload := []byte("pin")
+	drive := &cacheFakeDrive{files: []driveapi.File{remoteForObject("file-object-pinned", "pinned-v1", payload)}, payload: payload}
+	cache, err := New(drive, metadata, content, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewPinManager(metadata, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := metadata.ObjectByID(ctx, "object-pinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Pin(ctx, object.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	var progress []PinProgress
+	if err := manager.Sync(ctx, func(value PinProgress) { progress = append(progress, value) }); err != nil {
+		t.Fatal(err)
+	}
+	if drive.downloadCalls != 1 {
+		t.Fatalf("download calls = %d, want 1", drive.downloadCalls)
+	}
+	version, err := metadata.FindCachedContentVersion(ctx, object.ID, object.DriveVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version.LocalPath != filepath.ToSlash(filepath.Join("cache", "pinned", string(version.ID)+".blob")) {
+		t.Fatalf("pinned content path = %q, want pinned cache directory", version.LocalPath)
+	}
+	file, _, err := content.OpenContentVersion(ctx, version.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || string(got) != string(payload) {
+		t.Fatalf("pinned bytes = %q, readErr=%v closeErr=%v", got, readErr, closeErr)
+	}
+	if len(progress) < 3 || progress[len(progress)-1].State != "ready" ||
+		progress[len(progress)-1].CompletedFiles != 1 || progress[len(progress)-1].CompletedBytes != int64(len(payload)) {
+		t.Fatalf("pin progress = %#v", progress)
+	}
+	if overage, err := manager.OverLimitBytes(ctx); err != nil || overage != 2 {
+		t.Fatalf("pinned content cache overage = %d, err = %v; want 2", overage, err)
+	}
+	if err := manager.Unpin(ctx, object.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := metadata.EvictableCachedVersions(ctx)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("unpinned cached versions = %#v, err = %v", candidates, err)
+	}
+	if err := content.EvictCachedContent(ctx, candidates[0]); err != nil {
+		t.Fatalf("evict unpinned content from its prior pinned directory: %v", err)
+	}
+}
+
 func cacheFixture(t *testing.T, objectID, version string, size int) (*store.Store, *store.ContentStore) {
 	t.Helper()
 	root := t.TempDir()

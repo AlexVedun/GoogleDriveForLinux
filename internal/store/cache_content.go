@@ -23,6 +23,11 @@ type StagedContent struct {
 }
 
 func (s *ContentStore) StageDownload(ctx context.Context, source io.Reader, expectedSize int64, expectedMD5 string) (*StagedContent, error) {
+	return s.StageDownloadProgress(ctx, source, expectedSize, expectedMD5, nil)
+}
+
+func (s *ContentStore) StageDownloadProgress(ctx context.Context, source io.Reader, expectedSize int64, expectedMD5 string,
+	progress func(downloaded int64)) (*StagedContent, error) {
 	if ctx == nil || source == nil {
 		return nil, errors.New("context and download source are required")
 	}
@@ -46,8 +51,12 @@ func (s *ContentStore) StageDownload(ctx context.Context, source io.Reader, expe
 	sha := sha256.New()
 	md5Digest := md5.New()
 	writer := &reservedWriter{file: file, reservation: reservation}
+	var destination io.Writer = writer
+	if progress != nil {
+		destination = &progressWriter{writer: writer, progress: progress}
+	}
 	limitReader := io.LimitReader(contextReader{ctx: ctx, source: source}, expectedSize)
-	size, copyErr := io.CopyBuffer(io.MultiWriter(writer, sha, md5Digest), limitReader, make([]byte, contentCopyBufferSize))
+	size, copyErr := io.CopyBuffer(io.MultiWriter(destination, sha, md5Digest), limitReader, make([]byte, contentCopyBufferSize))
 	if copyErr == nil && size != expectedSize {
 		copyErr = fmt.Errorf("downloaded %d bytes, expected %d", size, expectedSize)
 	}
@@ -112,25 +121,36 @@ func (s *ContentStore) PublishCachedContent(ctx context.Context, objectID domain
 		return domain.ContentVersion{}, fmt.Errorf("create cached content version ID: %w", err)
 	}
 	versionID := domain.ContentVersionID("cv-" + token)
+	pinned, err := s.metadata.IsOfflinePinned(ctx, objectID)
+	if err != nil {
+		return domain.ContentVersion{}, err
+	}
+	localPath := s.relativeCachedBlobPath(versionID)
 	finalPath := s.cachedBlobPath(versionID)
+	cacheDirectory := s.paths.EvictableCache
+	if pinned {
+		localPath = s.relativePinnedBlobPath(versionID)
+		finalPath = s.pinnedBlobPath(versionID)
+		cacheDirectory = s.paths.Pinned
+	}
 	if err := os.Rename(staged.path, finalPath); err != nil {
 		return domain.ContentVersion{}, fmt.Errorf("publish cached content file: %w", err)
 	}
 	if err := syncDirectory(s.paths.Transient); err != nil {
 		return domain.ContentVersion{}, fmt.Errorf("sync download staging directory: %w", err)
 	}
-	if err := syncDirectory(s.paths.EvictableCache); err != nil {
+	if err := syncDirectory(cacheDirectory); err != nil {
 		return domain.ContentVersion{}, fmt.Errorf("sync cached content directory: %w", err)
 	}
 	version := domain.ContentVersion{
 		ID: versionID, ObjectID: objectID, Kind: domain.ContentCached,
-		LocalPath: s.relativeCachedBlobPath(versionID), Size: staged.Size,
+		LocalPath: localPath, Size: staged.Size,
 		SHA256: staged.SHA256, DriveVersion: driveVersion,
 		Complete: true, CreatedAt: time.Now().UTC(),
 	}
 	if err := s.metadata.RegisterCachedContentVersion(ctx, version); err != nil {
 		_ = os.Remove(finalPath)
-		_ = syncDirectory(s.paths.EvictableCache)
+		_ = syncDirectory(cacheDirectory)
 		return domain.ContentVersion{}, err
 	}
 	return version, nil
@@ -157,40 +177,40 @@ func (s *ContentStore) VerifyContentVersion(ctx context.Context, versionID domai
 }
 
 func (s *ContentStore) EvictCachedContent(ctx context.Context, version domain.ContentVersion) error {
-	if version.Kind != domain.ContentCached || version.LocalPath != s.relativeCachedBlobPath(version.ID) {
+	if version.Kind != domain.ContentCached || !s.isCachedBlobPath(version.ID, version.LocalPath) {
 		return errors.New("refusing to evict a non-cache content version")
 	}
 	localPath, err := s.metadata.DeleteEvictableCachedContent(ctx, version.ID)
 	if err != nil {
 		return err
 	}
-	if localPath != s.relativeCachedBlobPath(version.ID) {
+	if !s.isCachedBlobPath(version.ID, localPath) {
 		return errors.New("cached content path changed during eviction")
 	}
-	if err := os.Remove(s.cachedBlobPath(version.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(filepath.Join(s.paths.Root, filepath.FromSlash(localPath))); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove evicted cache file: %w", err)
 	}
-	if err := syncDirectory(s.paths.EvictableCache); err != nil {
+	if err := syncDirectory(filepath.Dir(filepath.Join(s.paths.Root, filepath.FromSlash(localPath)))); err != nil {
 		return fmt.Errorf("sync cache eviction: %w", err)
 	}
 	return nil
 }
 
 func (s *ContentStore) DiscardCorruptCachedContent(ctx context.Context, version domain.ContentVersion) error {
-	if version.Kind != domain.ContentCached || version.LocalPath != s.relativeCachedBlobPath(version.ID) {
+	if version.Kind != domain.ContentCached || !s.isCachedBlobPath(version.ID, version.LocalPath) {
 		return errors.New("refusing to discard a non-cache content version")
 	}
 	localPath, err := s.metadata.DeleteCachedContentVersion(ctx, version.ID)
 	if err != nil {
 		return err
 	}
-	if localPath != s.relativeCachedBlobPath(version.ID) {
+	if !s.isCachedBlobPath(version.ID, localPath) {
 		return errors.New("corrupt cached content path changed during cleanup")
 	}
-	if err := os.Remove(s.cachedBlobPath(version.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(filepath.Join(s.paths.Root, filepath.FromSlash(localPath))); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove corrupt cache file: %w", err)
 	}
-	if err := syncDirectory(s.paths.EvictableCache); err != nil {
+	if err := syncDirectory(filepath.Dir(filepath.Join(s.paths.Root, filepath.FromSlash(localPath)))); err != nil {
 		return fmt.Errorf("sync corrupt cache cleanup: %w", err)
 	}
 	return nil

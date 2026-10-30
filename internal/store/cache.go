@@ -32,7 +32,14 @@ func (s *Store) EvictableCachedVersions(ctx context.Context) ([]domain.ContentVe
 		c.size_bytes, COALESCE(c.sha256, ''), COALESCE(c.drive_version, ''), c.is_complete, c.is_current, c.created_at
 		FROM content_versions c JOIN objects o ON o.object_id = c.object_id
 		WHERE c.kind = 'cached' AND c.is_complete = 1
-		AND NOT EXISTS (SELECT 1 FROM offline_pins p WHERE p.object_id = c.object_id)
+		AND NOT EXISTS (
+			WITH RECURSIVE ancestors(object_id) AS (
+				SELECT c.object_id UNION SELECT de.parent_object_id FROM directory_entries de
+				JOIN ancestors a ON de.object_id = a.object_id
+			)
+			SELECT 1 FROM offline_pins p JOIN ancestors a ON a.object_id = p.object_id
+			WHERE p.object_id = c.object_id OR p.recursive = 1
+		)
 		AND NOT EXISTS (SELECT 1 FROM operations op WHERE op.object_id = c.object_id AND op.state <> 'committed')
 		ORDER BY c.created_at, c.version_id`)
 	if err != nil {
@@ -85,8 +92,9 @@ func (s *Store) RegisterCachedContentVersion(ctx context.Context, version domain
 	if dirty != 0 {
 		return ErrCachedObjectDirty
 	}
-	expectedPath := filepath.ToSlash(filepath.Join("cache", "evictable", string(version.ID)+".blob"))
-	if version.LocalPath != expectedPath {
+	expectedEvictable := filepath.ToSlash(filepath.Join("cache", "evictable", string(version.ID)+".blob"))
+	expectedPinned := filepath.ToSlash(filepath.Join("cache", "pinned", string(version.ID)+".blob"))
+	if version.LocalPath != expectedEvictable && version.LocalPath != expectedPinned {
 		return errors.New("cached content local path is invalid")
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO content_versions (
@@ -115,9 +123,15 @@ func (s *Store) DeleteEvictableCachedContent(ctx context.Context, versionID doma
 		return "", fmt.Errorf("read cached content for eviction: %w", err)
 	}
 	var protected int
-	if err := tx.QueryRowContext(ctx, `SELECT
-		EXISTS (SELECT 1 FROM offline_pins WHERE object_id = ?) OR
-		EXISTS (SELECT 1 FROM operations WHERE object_id = ? AND state <> 'committed')`, objectID, objectID).Scan(&protected); err != nil {
+	if err := tx.QueryRowContext(ctx, `WITH RECURSIVE ancestors(object_id) AS (
+		SELECT ? UNION SELECT de.parent_object_id FROM directory_entries de
+		JOIN ancestors a ON de.object_id = a.object_id
+	)
+	SELECT EXISTS (
+		SELECT 1 FROM offline_pins p JOIN ancestors a ON a.object_id = p.object_id
+		WHERE p.object_id = ? OR p.recursive = 1
+	) OR EXISTS (SELECT 1 FROM operations WHERE object_id = ? AND state <> 'committed')`,
+		objectID, objectID, objectID).Scan(&protected); err != nil {
 		return "", fmt.Errorf("check cached content eviction protection: %w", err)
 	}
 	if protected != 0 {

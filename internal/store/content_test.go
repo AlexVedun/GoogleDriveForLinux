@@ -309,8 +309,9 @@ func TestRecoveryRemovesOnlyGeneratedUnreferencedPendingFiles(t *testing.T) {
 	orphanVersion := domain.ContentVersionID("cv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	orphanStage := filepath.Join(content.Paths().Pending, "."+string(orphanVersion)+".tmp")
 	orphanBlob := filepath.Join(content.Paths().Pending, string(orphanVersion)+".blob")
+	pinnedOrphan := filepath.Join(content.Paths().Pinned, string(orphanVersion)+".blob")
 	unrecognized := filepath.Join(content.Paths().Pending, "user-notes.txt")
-	for _, path := range []string{orphanStage, orphanBlob, unrecognized} {
+	for _, path := range []string{orphanStage, orphanBlob, pinnedOrphan, unrecognized} {
 		if err := os.WriteFile(path, []byte("orphan"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -318,7 +319,7 @@ func TestRecoveryRemovesOnlyGeneratedUnreferencedPendingFiles(t *testing.T) {
 	if _, err := content.Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{orphanStage, orphanBlob} {
+	for _, path := range []string{orphanStage, orphanBlob, pinnedOrphan} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("generated orphan %q was not removed: %v", path, err)
 		}

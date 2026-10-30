@@ -22,8 +22,8 @@ func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	version, err := store.SchemaVersion(ctx)
-	if err != nil || version != 4 {
-		t.Fatalf("schema version = %d, err = %v; want 4, nil", version, err)
+	if err != nil || version != 5 {
+		t.Fatalf("schema version = %d, err = %v; want 5, nil", version, err)
 	}
 	root, err := store.ObjectByID(ctx, domain.RootObjectID)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 	}
 }
 
-func TestExistingVersionOneDatabaseUpgradesToVersionThree(t *testing.T) {
+func TestExistingVersionOneDatabaseUpgradesToVersionFiveAndPreservesFolderPins(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "legacy.db")
 	legacy, err := sql.Open("sqlite3", databasePath)
@@ -120,6 +120,25 @@ func TestExistingVersionOneDatabaseUpgradesToVersionThree(t *testing.T) {
 		VALUES (1, '', 'empty', ?)`, now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO inode_sequence DEFAULT VALUES`); err != nil {
+		t.Fatal(err)
+	}
+	var folderInodeID int64
+	if err := legacy.QueryRowContext(ctx, `SELECT MAX(inode) FROM inode_sequence`).Scan(&folderInodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO objects (
+		object_id, drive_file_id, inode, mime_type, size_bytes, capabilities_json, is_deleted, created_at, updated_at
+	) VALUES ('legacy-folder', 'legacy-folder-drive-id', ?, ?, 0, '{}', 0, ?, ?)`, folderInodeID, rootMIMEType, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO directory_entries(parent_object_id, object_id, remote_name, display_name)
+		VALUES (?, 'legacy-folder', 'folder', 'folder')`, domain.RootObjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO offline_pins(object_id, pinned_at) VALUES ('legacy-folder', ?)`, now); err != nil {
+		t.Fatal(err)
+	}
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -130,8 +149,12 @@ func TestExistingVersionOneDatabaseUpgradesToVersionThree(t *testing.T) {
 	}
 	defer upgraded.Close()
 	version, err := upgraded.SchemaVersion(ctx)
-	if err != nil || version != 4 {
+	if err != nil || version != 5 {
 		t.Fatalf("upgraded schema version = %d, err = %v", version, err)
+	}
+	pins, err := upgraded.OfflinePins(ctx)
+	if err != nil || len(pins) != 1 || !pins[0].Recursive {
+		t.Fatalf("upgraded folder pin = %#v, err = %v; want recursive", pins, err)
 	}
 	root, err := upgraded.ObjectByID(ctx, domain.RootObjectID)
 	if err != nil || root.Inode != RootInode {
