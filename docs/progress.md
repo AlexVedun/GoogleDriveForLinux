@@ -129,7 +129,16 @@
 - Limitations: `/dev/fuse` is unavailable, so file-manager operations were verified through FUSE node methods rather than a live mount. No Google Drive requests or live trash/move operations were performed. The CLI is still read-only and there is no queue worker yet.
 - Git commit: `7dd82b9` (`feat: queue folder rename move and trash operations`).
 
+## Step 15 — durable queue worker and resumable recovery
+
+- Added `internal/syncworker` to process dependency-ready create, folder, write, rename/move, and trash operations. It reserves generated Drive IDs before create, uses the operation ID in `appProperties`, checks base versions before writes, validates immutable content SHA-256 and returned Drive checksums, and commits verified remote metadata with the queue transition in one SQLite transaction.
+- Added persisted resumable-session URL/offset handling. After restart the worker queries Drive first, trusts the server's acknowledged offset, and checks the reserved file ID before restarting an expired session. Unknown create, upload, rename, and trash outcomes remain visible as reconciliation work; local pending bytes are preserved. Retryable queue failures use bounded exponential backoff with jitter.
+- Added a real subprocess test matrix that sends `SIGKILL` after queue claim, after Drive ID reservation, after session persistence, after a chunk is accepted, after the final upload is accepted but before its response, and after folder creation but before its response. On reopen, each operation completes once; additional fake-Drive tests cover lost responses, expired sessions, dependencies, content corruption, version conflicts, zero-length uploads, rename/move, and trash.
+- Validation: `make check`, `go test -race ./internal/store ./internal/indexer ./internal/driveapi ./internal/syncworker -count=1`, `make qt-smoke`, and `git diff --check` passed. Fake HTTP tests used local loopback. No live Google Drive requests were made.
+- Limitations: the worker is an injectable package and is not yet wired into the OAuth, writable FUSE, or desktop process lifecycle. `/dev/fuse` is unavailable, so no live mount or file-manager test ran. Process-kill recovery does not simulate power loss.
+- Git commit: `442d9e6` (`feat: sync queued operations with resumable recovery`).
+
 ## Next
 
-Step 15: execute queued operations with dependency ordering and resumable upload recovery.
+Step 16: reconcile remote edits and prevent or surface write conflicts.
 
