@@ -358,6 +358,52 @@ func canEdit(object domain.Object) bool {
 	return json.Unmarshal([]byte(object.CapabilitiesJSON), &capabilities) == nil && capabilities.CanEdit
 }
 
+func capabilityOrEdit(object domain.Object, key string) bool {
+	if object.DriveFileID == nil {
+		return true
+	}
+	var capabilities map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(object.CapabilitiesJSON), &capabilities); err != nil {
+		return false
+	}
+	encoded, exists := capabilities[key]
+	if !exists {
+		return canEdit(object)
+	}
+	var allowed bool
+	return json.Unmarshal(encoded, &allowed) == nil && allowed
+}
+
+func canAddChildren(object domain.Object) bool {
+	return object.ID == domain.RootObjectID || capabilityOrEdit(object, "canAddChildren")
+}
+
+func canRemoveChildren(object domain.Object) bool {
+	return object.ID == domain.RootObjectID || capabilityOrEdit(object, "canRemoveChildren")
+}
+
+func canRenameObject(object domain.Object) bool {
+	return capabilityOrEdit(object, "canRename")
+}
+
+func canMoveItemWithinDrive(object domain.Object) bool {
+	return capabilityOrEdit(object, "canMoveItemWithinDrive")
+}
+
+func canTrashObject(object domain.Object) bool {
+	if object.DriveFileID == nil {
+		return true
+	}
+	var capabilities struct {
+		CanTrash bool `json:"canTrash"`
+	}
+	return json.Unmarshal([]byte(object.CapabilitiesJSON), &capabilities) == nil && capabilities.CanTrash
+}
+
+func canModifyDirectory(object domain.Object) bool {
+	return canAddChildren(object) || canRemoveChildren(object)
+}
+
 func contentTypeForName(name string) string {
 	contentType := mime.TypeByExtension(filepath.Ext(name))
 	if contentType == "" {
@@ -431,6 +477,9 @@ func (n *IndexedNode) create(ctx context.Context, name string, flags uint32, mod
 	}
 	if parent.MIMEType != googleFolderMIMEType {
 		return nil, nil, 0, syscall.ENOTDIR
+	}
+	if !canAddChildren(parent) {
+		return nil, nil, 0, syscall.EACCES
 	}
 	if _, err := n.metadata.DirectoryEntry(ctx, parent.ID, name); err == nil {
 		return nil, nil, 0, syscall.EEXIST

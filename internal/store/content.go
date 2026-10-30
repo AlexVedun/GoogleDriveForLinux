@@ -456,6 +456,13 @@ func (s *ContentStore) createPrepared(ctx context.Context, request WriteRequest,
 		string(request.Kind), request.IdempotencyKey, request.BaseDriveVersion, string(versionID), now, now); err != nil {
 		return domain.Operation{}, fmt.Errorf("record prepared write operation: %w", err)
 	}
+	dependencies, err := operationDependenciesForContentTx(ctx, tx, request.ObjectID, request.OperationID)
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	if err := insertOperationDependenciesTx(ctx, tx, request.OperationID, dependencies); err != nil {
+		return domain.Operation{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return domain.Operation{}, fmt.Errorf("commit prepared write operation: %w", err)
 	}

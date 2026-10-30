@@ -17,6 +17,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/sys/unix"
 
 	"google-drive-linux/internal/contentcache"
 	"google-drive-linux/internal/domain"
@@ -309,6 +310,228 @@ func TestFUSEReportsNoSpaceWhenDurableQueueCannotReserveStorage(t *testing.T) {
 	}
 }
 
+func TestFUSEMkdirRenameReplaceUnlinkAndRecursiveRmdir(t *testing.T) {
+	ctx := context.Background()
+	metadata := openIndexedTestStore(t, 0)
+	defer metadata.Close()
+	content, err := store.NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewIndexedRootWithWriter(metadata, nil, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fs.NewNodeFS(root, &fs.Options{RootStableAttr: &fs.StableAttr{Ino: uint64(store.RootInode)}})
+
+	workInode, errno := root.Mkdir(ctx, "work", 0o755, &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	work := workInode.Operations().(*IndexedNode)
+	target, _ := createFUSEFile(t, ctx, root, metadata, "target.txt", "old")
+	source, _ := createFUSEFile(t, ctx, work, metadata, "editor.tmp", "new contents")
+	if errno := work.Rename(ctx, "editor.tmp", root, "target.txt", 0); errno != 0 {
+		t.Fatalf("atomic editor rename errno = %v", errno)
+	}
+	if errno := work.Rename(ctx, "target.txt", root, "already-there.txt", uint32(unix.RENAME_NOREPLACE)); errno != syscall.ENOENT {
+		t.Fatalf("rename missing source errno = %v, want ENOENT", errno)
+	}
+	if _, errno := root.Lookup(ctx, "target.txt", &fuse.EntryOut{}); errno != 0 {
+		t.Fatalf("replacement target lookup errno = %v", errno)
+	}
+	if _, errno := work.Lookup(ctx, "editor.tmp", &fuse.EntryOut{}); errno != syscall.ENOENT {
+		t.Fatalf("old editor temp lookup errno = %v, want ENOENT", errno)
+	}
+	if live, err := metadata.ObjectByID(ctx, source.ID); err != nil || live.DriveFileID != nil {
+		t.Fatalf("renamed local object lost its identity: %#v err=%v", live, err)
+	}
+	if replaced, err := metadata.ObjectByID(ctx, target.ID); err != nil || !replaced.Deleted {
+		t.Fatalf("replaced object deleted=%v err=%v", replaced.Deleted, err)
+	}
+	sourceOps, err := metadata.OperationsForObject(ctx, source.ID)
+	if err != nil || len(sourceOps) != 2 || sourceOps[1].Kind != domain.OperationRename {
+		t.Fatalf("source operations = %#v err=%v; want create then rename", sourceOps, err)
+	}
+	targetOps, err := metadata.OperationsForObject(ctx, target.ID)
+	if err != nil || len(targetOps) != 2 || targetOps[1].Kind != domain.OperationTrash {
+		t.Fatalf("replaced target operations = %#v err=%v; want create then trash", targetOps, err)
+	}
+	deps, err := metadata.OperationDependencies(ctx, sourceOps[1].ID)
+	if err != nil || !containsOperationID(deps, targetOps[1].ID) {
+		t.Fatalf("rename dependencies = %v err=%v; want destination trash %s", deps, err, targetOps[1].ID)
+	}
+	assertPendingContent(t, ctx, metadata, content, source.ID, "new contents", 2)
+	assertPendingContent(t, ctx, metadata, content, target.ID, "old", 2)
+
+	folderInode, errno := root.Mkdir(ctx, "recursive", 0o755, &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	folder := folderInode.Operations().(*IndexedNode)
+	child, _ := createFUSEFile(t, ctx, folder, metadata, "child.txt", "child")
+	if errno := root.Rmdir(ctx, "recursive"); errno != syscall.ENOTEMPTY {
+		t.Fatalf("rmdir non-empty folder errno = %v, want ENOTEMPTY", errno)
+	}
+	if errno := root.Unlink(ctx, "recursive"); errno != syscall.EISDIR {
+		t.Fatalf("unlink folder errno = %v, want EISDIR", errno)
+	}
+	if errno := folder.Unlink(ctx, "child.txt"); errno != 0 {
+		t.Fatalf("unlink child errno = %v", errno)
+	}
+	folderObject, err := metadata.ObjectByInode(ctx, domain.Inode(folderInode.StableAttr().Ino))
+	if err != nil {
+		t.Fatal(err)
+	}
+	folderOps, err := metadata.OperationsForObject(ctx, folderObject.ID)
+	if err != nil || len(folderOps) != 1 || folderOps[0].Kind != domain.OperationMkdir {
+		t.Fatalf("folder operations before rmdir = %#v err=%v", folderOps, err)
+	}
+	if errno := root.Rmdir(ctx, "recursive"); errno != 0 {
+		t.Fatalf("rmdir empty folder errno = %v", errno)
+	}
+	childOps, err := metadata.OperationsForObject(ctx, child.ID)
+	if err != nil || len(childOps) != 2 || childOps[1].Kind != domain.OperationTrash {
+		t.Fatalf("child operations = %#v err=%v", childOps, err)
+	}
+	deps, err = metadata.OperationDependencies(ctx, childOps[0].ID)
+	if err != nil || !containsOperationID(deps, folderOps[0].ID) {
+		t.Fatalf("child create dependencies = %v err=%v; want folder mkdir %s", deps, err, folderOps[0].ID)
+	}
+	folderOps, err = metadata.OperationsForObject(ctx, folderObject.ID)
+	if err != nil || len(folderOps) != 2 || folderOps[1].Kind != domain.OperationTrash {
+		t.Fatalf("folder operations after rmdir = %#v err=%v", folderOps, err)
+	}
+	deps, err = metadata.OperationDependencies(ctx, folderOps[1].ID)
+	if err != nil || !containsOperationID(deps, childOps[1].ID) {
+		t.Fatalf("folder trash dependencies = %v err=%v; want child trash %s", deps, err, childOps[1].ID)
+	}
+	folderEntry, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "recursive")
+	if err == nil || folderEntry.ObjectID != "" {
+		t.Fatalf("recursive folder entry remains visible: %#v err=%v", folderEntry, err)
+	}
+}
+
+func TestFUSERemoteMoveKeepsDriveIDAndHonorsCapabilities(t *testing.T) {
+	ctx := context.Background()
+	metadata := openIndexedTestStore(t, 1)
+	defer metadata.Close()
+	entry := indexedTestEntry("file-0000", "file-0000.txt", "root-drive", "text/plain", 0)
+	entry.Object.DriveVersion = "move-version"
+	entry.Object.CapabilitiesJSON = `{"canEdit":true,"canTrash":false,"canRename":true,"canMoveItemWithinDrive":true,"canAddChildren":true,"canRemoveChildren":true}`
+	folderEntry := indexedTestEntry("folder", "folder", "root-drive", googleFolderMIMEType, 0)
+	folderEntry.Object.CapabilitiesJSON = `{"canEdit":true,"canAddChildren":false,"canRemoveChildren":false}`
+	nestedEntry := indexedTestEntry("nested-file", "nested.txt", "folder", "text/plain", 0)
+	nestedEntry.Object.CapabilitiesJSON = `{"canEdit":true,"canTrash":true,"canRename":true,"canMoveItemWithinDrive":true}`
+	page, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitChangePage(ctx, page, []store.RemoteChange{
+		{DriveFileID: "file-0000", Entry: &entry},
+		{DriveFileID: "folder", Entry: &folderEntry},
+		{DriveFileID: "nested-file", Entry: &nestedEntry},
+	}, "", "move-live"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := store.NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewIndexedRootWithWriter(metadata, nil, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fs.NewNodeFS(root, &fs.Options{RootStableAttr: &fs.StableAttr{Ino: uint64(store.RootInode)}})
+	folderInode, errno := root.Lookup(ctx, "folder", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	folder := folderInode.Operations().(*IndexedNode)
+	if _, _, _, errno := folder.Create(ctx, "blocked.txt", uint32(os.O_RDWR), 0o644, &fuse.EntryOut{}); errno != syscall.EACCES {
+		t.Fatalf("Create without canAddChildren errno = %v, want EACCES", errno)
+	}
+	if errno := folder.Unlink(ctx, "nested.txt"); errno != syscall.EACCES {
+		t.Fatalf("Unlink without parent canRemoveChildren errno = %v, want EACCES", errno)
+	}
+	if errno := folder.Rename(ctx, "nested.txt", root, "nested-moved.txt", 0); errno != syscall.EACCES {
+		t.Fatalf("cross-parent rename without parent canRemoveChildren errno = %v, want EACCES", errno)
+	}
+	if errno := root.Unlink(ctx, "file-0000.txt"); errno != syscall.EACCES {
+		t.Fatalf("Unlink without canTrash errno = %v, want EACCES", errno)
+	}
+	occupied, _ := createFUSEFile(t, ctx, root, metadata, "occupied.txt", "local")
+	_ = occupied
+	if errno := root.Rename(ctx, "file-0000.txt", root, "occupied.txt", uint32(unix.RENAME_NOREPLACE)); errno != syscall.EEXIST {
+		t.Fatalf("RENAME_NOREPLACE errno = %v, want EEXIST", errno)
+	}
+	destinationInode, errno := root.Mkdir(ctx, "destination", 0o755, &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	destination := destinationInode.Operations().(*IndexedNode)
+	if errno := root.Rename(ctx, "file-0000.txt", destination, "renamed-remote.txt", 0); errno != 0 {
+		t.Fatalf("remote rename errno = %v", errno)
+	}
+	object, err := metadata.ObjectByID(ctx, "drive:file-0000")
+	if err != nil || object.DriveFileID == nil || *object.DriveFileID != "file-0000" {
+		t.Fatalf("remote rename lost Drive ID: object=%#v err=%v", object, err)
+	}
+	destinationObject, err := metadata.ObjectByInode(ctx, domain.Inode(destinationInode.StableAttr().Ino))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := metadata.DirectoryEntry(ctx, destinationObject.ID, "renamed-remote.txt"); err != nil {
+		t.Fatal(err)
+	}
+	operations, err := metadata.OperationsForObject(ctx, object.ID)
+	if err != nil || len(operations) != 1 || operations[0].Kind != domain.OperationRename {
+		t.Fatalf("remote move operations = %#v err=%v", operations, err)
+	}
+	dependencies, err := metadata.OperationDependencies(ctx, operations[0].ID)
+	destinationOperations, opErr := metadata.OperationsForObject(ctx, destinationObject.ID)
+	if err != nil || opErr != nil || len(destinationOperations) != 1 || !containsOperationID(dependencies, destinationOperations[0].ID) {
+		t.Fatalf("remote move dependencies = %v err=%v; destination ops=%#v err=%v", dependencies, err, destinationOperations, opErr)
+	}
+	if errno := destination.Unlink(ctx, "renamed-remote.txt"); errno != syscall.EACCES {
+		t.Fatalf("Unlink after move without canTrash errno = %v, want EACCES", errno)
+	}
+}
+
+func createFUSEFile(t *testing.T, ctx context.Context, parent *IndexedNode, metadata *store.Store, name, contents string) (domain.Object, *IndexedNode) {
+	t.Helper()
+	inode, handle, _, errno := parent.Create(ctx, name, uint32(os.O_RDWR), 0o644, &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("Create(%s) errno = %v", name, errno)
+	}
+	node := inode.Operations().(*IndexedNode)
+	if len(contents) > 0 {
+		if count, errno := node.Write(ctx, handle, []byte(contents), 0); errno != 0 || count != uint32(len(contents)) {
+			t.Fatalf("Write(%s) = %d, %v", name, count, errno)
+		}
+	}
+	if errno := node.Fsync(ctx, handle, 0); errno != 0 {
+		t.Fatalf("Fsync(%s) errno = %v", name, errno)
+	}
+	object, err := metadata.ObjectByInode(ctx, domain.Inode(inode.StableAttr().Ino))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errno := node.Release(ctx, handle); errno != 0 {
+		t.Fatalf("Release(%s) errno = %v", name, errno)
+	}
+	return object, node
+}
+
+func containsOperationID(ids []domain.OperationID, wanted domain.OperationID) bool {
+	for _, id := range ids {
+		if id == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func TestFsyncSurvivesImmediateSIGKILL(t *testing.T) {
 	if os.Getenv("GDL_FSYNC_CRASH_HELPER") == "1" {
 		metadata, err := store.Open(os.Getenv("GDL_FSYNC_DB"))
@@ -401,6 +624,15 @@ func assertPendingContent(t *testing.T, ctx context.Context, metadata *store.Sto
 	count, err := metadata.OperationCount(ctx, objectID)
 	if err != nil || count != operations {
 		t.Fatalf("operation count = %d, err=%v; want %d", count, err, operations)
+	}
+	queued, err := metadata.OperationsForObject(ctx, objectID)
+	if err != nil || len(queued) != operations {
+		t.Fatalf("queued operation records = %#v err=%v; want %d", queued, err, operations)
+	}
+	for _, operation := range queued {
+		if operation.State != domain.OperationQueued {
+			t.Fatalf("operation %s state = %q, want queued", operation.ID, operation.State)
+		}
 	}
 	current, err := content.CurrentContentVersion(ctx, objectID)
 	if err != nil || current.Kind != domain.ContentPending || !current.Complete || !current.Current {

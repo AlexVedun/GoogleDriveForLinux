@@ -27,15 +27,19 @@ type API interface {
 }
 
 const (
-	defaultFileFields = "id,name,mimeType,parents,size,version,modifiedTime,webViewLink,md5Checksum,trashed,driveId,capabilities(canEdit,canTrash,canDownload)"
+	defaultFileFields = "id,name,mimeType,parents,size,version,modifiedTime,webViewLink,md5Checksum,trashed,driveId,capabilities(canEdit,canTrash,canDownload,canRename,canMoveItemWithinDrive,canAddChildren,canRemoveChildren)"
 	fileListFields    = "nextPageToken,files(" + defaultFileFields + ")"
 	changeListFields  = "nextPageToken,newStartPageToken,changes(fileId,removed,time,file(" + defaultFileFields + "))"
 )
 
 type Capabilities struct {
-	CanEdit     bool `json:"canEdit"`
-	CanTrash    bool `json:"canTrash"`
-	CanDownload bool `json:"canDownload"`
+	CanEdit                bool `json:"canEdit"`
+	CanTrash               bool `json:"canTrash"`
+	CanDownload            bool `json:"canDownload"`
+	CanRename              bool `json:"canRename"`
+	CanMoveItemWithinDrive bool `json:"canMoveItemWithinDrive"`
+	CanAddChildren         bool `json:"canAddChildren"`
+	CanRemoveChildren      bool `json:"canRemoveChildren"`
 }
 
 type File struct {

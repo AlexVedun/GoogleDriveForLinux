@@ -29,7 +29,7 @@ func TestDriveOperationsAgainstFakeServer(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch {
 		case request.Method == http.MethodGet && request.URL.Path == "/drive/v3/files":
-			if request.URL.Query().Get("spaces") != "drive" || request.URL.Query().Get("q") != "name contains 'a'" || !strings.Contains(request.URL.Query().Get("fields"), "capabilities(canEdit,canTrash,canDownload)") {
+			if request.URL.Query().Get("spaces") != "drive" || request.URL.Query().Get("q") != "name contains 'a'" || !strings.Contains(request.URL.Query().Get("fields"), "capabilities(canEdit,canTrash,canDownload,canRename,canMoveItemWithinDrive,canAddChildren,canRemoveChildren)") {
 				http.Error(writer, `{"error":"missing query fields"}`, http.StatusBadRequest)
 				return
 			}

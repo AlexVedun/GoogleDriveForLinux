@@ -16,6 +16,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/sys/unix"
 
 	"google-drive-linux/internal/contentcache"
 	"google-drive-linux/internal/domain"
@@ -357,8 +358,37 @@ func (n *IndexedNode) Create(ctx context.Context, name string, flags uint32, mod
 	return n.create(ctx, name, flags, mode, out)
 }
 
-func (n *IndexedNode) Mkdir(context.Context, string, uint32, *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	return nil, syscall.EROFS
+func (n *IndexedNode) Mkdir(ctx context.Context, name string, _ uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if n.writer == nil {
+		return nil, syscall.EROFS
+	}
+	if !validCreateName(name) {
+		return nil, syscall.EINVAL
+	}
+	parent, errno := n.object(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
+	if parent.MIMEType != googleFolderMIMEType {
+		return nil, syscall.ENOTDIR
+	}
+	if !canAddChildren(parent) {
+		return nil, syscall.EACCES
+	}
+	object, _, err := n.metadata.CreateLocalFolder(ctx, parent.ID, name)
+	if err != nil {
+		return nil, errnoForError(err)
+	}
+	mode, errno := n.modeForObject(object)
+	if errno != 0 {
+		return nil, errno
+	}
+	fillAttr(&out.Attr, object, mode)
+	out.Mode = mode
+	return n.NewInode(ctx, &IndexedNode{metadata: n.metadata, reader: n.reader, writer: n.writer, objectID: object.ID}, fs.StableAttr{
+		Mode: mode & syscall.S_IFMT,
+		Ino:  uint64(object.Inode),
+	}), 0
 }
 
 func (n *IndexedNode) Mknod(context.Context, string, uint32, uint32, *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -373,12 +403,134 @@ func (n *IndexedNode) Symlink(context.Context, string, string, *fuse.EntryOut) (
 	return nil, syscall.EROFS
 }
 
-func (n *IndexedNode) Unlink(context.Context, string) syscall.Errno { return syscall.EROFS }
+func (n *IndexedNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	if n.writer == nil {
+		return syscall.EROFS
+	}
+	if !validCreateName(name) {
+		return syscall.EINVAL
+	}
+	parent, errno := n.object(ctx)
+	if errno != 0 {
+		return errno
+	}
+	if parent.MIMEType != googleFolderMIMEType {
+		return syscall.ENOTDIR
+	}
+	if !canRemoveChildren(parent) {
+		return syscall.EACCES
+	}
+	entry, err := n.metadata.DirectoryEntry(ctx, parent.ID, name)
+	if err != nil {
+		return errnoForError(err)
+	}
+	object, err := n.metadata.ObjectByID(ctx, entry.ObjectID)
+	if err != nil {
+		return errnoForError(err)
+	}
+	if object.MIMEType == googleFolderMIMEType {
+		return syscall.EISDIR
+	}
+	if !canTrashObject(object) {
+		return syscall.EACCES
+	}
+	_, err = n.metadata.QueueTrash(ctx, parent.ID, name, false)
+	return errnoForError(err)
+}
 
-func (n *IndexedNode) Rmdir(context.Context, string) syscall.Errno { return syscall.EROFS }
+func (n *IndexedNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	if n.writer == nil {
+		return syscall.EROFS
+	}
+	if !validCreateName(name) {
+		return syscall.EINVAL
+	}
+	parent, errno := n.object(ctx)
+	if errno != 0 {
+		return errno
+	}
+	if parent.MIMEType != googleFolderMIMEType {
+		return syscall.ENOTDIR
+	}
+	if !canRemoveChildren(parent) {
+		return syscall.EACCES
+	}
+	entry, err := n.metadata.DirectoryEntry(ctx, parent.ID, name)
+	if err != nil {
+		return errnoForError(err)
+	}
+	object, err := n.metadata.ObjectByID(ctx, entry.ObjectID)
+	if err != nil {
+		return errnoForError(err)
+	}
+	if object.MIMEType != googleFolderMIMEType {
+		return syscall.ENOTDIR
+	}
+	if !canTrashObject(object) {
+		return syscall.EACCES
+	}
+	_, err = n.metadata.QueueTrash(ctx, parent.ID, name, true)
+	return errnoForError(err)
+}
 
-func (n *IndexedNode) Rename(context.Context, string, fs.InodeEmbedder, string, uint32) syscall.Errno {
-	return syscall.EROFS
+func (n *IndexedNode) Rename(ctx context.Context, oldName string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	if n.writer == nil {
+		return syscall.EROFS
+	}
+	if !validCreateName(oldName) || !validCreateName(newName) {
+		return syscall.EINVAL
+	}
+	if flags&^uint32(unix.RENAME_NOREPLACE) != 0 {
+		return syscall.EOPNOTSUPP
+	}
+	newParentNode, ok := newParent.(*IndexedNode)
+	if !ok || newParentNode.metadata != n.metadata {
+		return syscall.EXDEV
+	}
+	oldParentObject, errno := n.object(ctx)
+	if errno != 0 {
+		return errno
+	}
+	newParentObject, errno := newParentNode.object(ctx)
+	if errno != 0 {
+		return errno
+	}
+	if oldParentObject.MIMEType != googleFolderMIMEType || newParentObject.MIMEType != googleFolderMIMEType {
+		return syscall.ENOTDIR
+	}
+	entry, err := n.metadata.DirectoryEntry(ctx, oldParentObject.ID, oldName)
+	if err != nil {
+		return errnoForError(err)
+	}
+	source, err := n.metadata.ObjectByID(ctx, entry.ObjectID)
+	if err != nil {
+		return errnoForError(err)
+	}
+	if !canRenameObject(source) {
+		return syscall.EACCES
+	}
+	if oldParentObject.ID != newParentObject.ID &&
+		(!canRemoveChildren(oldParentObject) || !canAddChildren(newParentObject) || !canMoveItemWithinDrive(source)) {
+		return syscall.EACCES
+	}
+	if destination, err := n.metadata.DirectoryEntry(ctx, newParentObject.ID, newName); err == nil {
+		if flags&uint32(unix.RENAME_NOREPLACE) != 0 {
+			return syscall.EEXIST
+		}
+		if destination.ObjectID != source.ID {
+			destinationObject, objectErr := n.metadata.ObjectByID(ctx, destination.ObjectID)
+			if objectErr != nil {
+				return errnoForError(objectErr)
+			}
+			if !canTrashObject(destinationObject) {
+				return syscall.EACCES
+			}
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return errnoForError(err)
+	}
+	_, err = n.metadata.QueueRename(ctx, oldParentObject.ID, oldName, newParentObject.ID, newName, flags&uint32(unix.RENAME_NOREPLACE) != 0)
+	return errnoForError(err)
 }
 
 func (n *IndexedNode) object(ctx context.Context) (domain.Object, syscall.Errno) {
@@ -410,7 +562,10 @@ func (n *IndexedNode) modeForObject(object domain.Object) (uint32, syscall.Errno
 		return mode, errno
 	}
 	if object.MIMEType == googleFolderMIMEType {
-		return fuse.S_IFDIR | 0o755, 0
+		if canModifyDirectory(object) {
+			return fuse.S_IFDIR | 0o755, 0
+		}
+		return fuse.S_IFDIR | 0o555, 0
 	}
 	if canEdit(object) {
 		return fuse.S_IFREG | 0o644, 0
@@ -449,7 +604,18 @@ func setFuseTime(value time.Time, seconds *uint64, nanoseconds *uint32) {
 }
 
 func errnoForError(err error) syscall.Errno {
+	if err == nil {
+		return 0
+	}
 	switch {
+	case errors.Is(err, store.ErrDirectoryNotEmpty):
+		return syscall.ENOTEMPTY
+	case errors.Is(err, store.ErrNotDirectory):
+		return syscall.ENOTDIR
+	case errors.Is(err, store.ErrIsDirectory):
+		return syscall.EISDIR
+	case errors.Is(err, store.ErrDirectoryCycle):
+		return syscall.EINVAL
 	case errors.Is(err, store.ErrDirectoryEntryExists):
 		return syscall.EEXIST
 	case errors.Is(err, sql.ErrNoRows):
