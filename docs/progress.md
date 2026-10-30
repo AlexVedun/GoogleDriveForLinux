@@ -155,7 +155,16 @@
 - Limitations: the >1 GiB quota test simulates Drive size in SQLite metadata rather than downloading a physical 1 GiB file. `/dev/fuse` and a live Drive account are unavailable. The GUI display is step 19; the worker is not yet triggered by the IPC/process lifecycle.
 - Git commit: `6902f28` (`feat: add offline pins and disk space guard`).
 
+## Step 18 — local IPC and process lifecycle
+
+- Added a version 1 JSON request/response protocol over a per-user Unix socket. The server checks that the parent directory is owned by the current UID and private, forces socket mode `0600`, rejects symlink/non-socket paths, verifies `SO_PEERCRED`, bounds messages, and removes only the same owned socket it created. A stale owned socket can be replaced; a live server is detected without creating a second service.
+- Added commands for status, queue/progress and error summaries, recent events, conflicts and resolution, pins, mount/unmount, settings, sign-out, and quit. Settings and sign-out commands return an explicit unavailable error until their backends are connected. Queue IPC omits payload JSON and resumable session URLs.
+- `drivefs --ipc-server` now owns the FUSE lifecycle. Mount/unmount are idempotent, the controller clears state after an unexpected mount exit, and explicit quit or SIGTERM unmounts before the process stops. The database and pending queue survive exit. The Qt client starts or connects to the one service, retries an existing service after disconnect, hides on window close when a tray exists, and provides an explicit quit/unmount control.
+- Validation: `go test ./...` passed after the main IPC/lifecycle wiring. After the final socket-context and Qt reconnect-guard edits, `go vet ./internal/ipc ./internal/drivecontrol ./internal/store ./cmd/drivefs` and `go test -race ./internal/ipc ./internal/drivecontrol ./internal/store -count=1` passed; the Qt entry point still needs a fresh full build. `git diff --check` passed. A second full `go vet ./...` was stopped while it rebuilt the generated MIQT/Qt cgo package; the full gate is reserved for step 21.
+- Lifecycle tests cover active-socket detection, stale-socket replacement, bad directory/file permissions, version mismatch, idempotent mount/unmount/quit, simulated mount-process exit, and preservation of a queued folder operation. No live `/dev/fuse` mount was possible. GUI disconnect during a real active upload is not covered because the sync worker is not yet connected to the service; the namespace mounted by this service is currently read-only.
+- Git commit: `851de3d` (`feat: connect Qt app and filesystem over local IPC`).
+
 ## Next
 
-Step 18: safe local IPC and process lifecycle.
+Step 19: full Qt controls and sync status views.
 
