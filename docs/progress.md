@@ -31,9 +31,19 @@
 - Toolchain tested: Go 1.26.10, MIQT 0.15.0, Qt 6.11.2, GCC 16.2.1, Fedora 44 x86_64; CGO and `pkg-config Qt6Widgets` are required.
 - Desktop limitation: although this process has GNOME Wayland environment variables, opening the compositor socket returns `EPERM`; a minimal C++ Qt application also aborts in that condition. Visual tray display, folder picker, and close/reopen behavior therefore remain unverified in an unrestricted desktop session. FUSE mounting remains unavailable because `/dev/fuse` is absent.
 - Packaging limitation: this proves extraction and an offscreen Qt launch on Fedora 44 only. Old glibc compatibility, actual Wayland/X11 rendering, and a real Drive client are not verified. The ordinary AppImage launch also needs a host FUSE configuration; extraction-and-run is only a packaging test.
+- Git commit: `7884c94` (`feat: prove Qt Widgets tray and AppImage build`).
+
+## Step 5 — domain model and SQLite schema
+
+- Added typed object, Drive file, inode, content-version, operation, account, sync-state and event models under `internal/domain`.
+- Added a versioned SQLite schema for objects, parent/name mappings, immutable content-version references, queue operations and dependencies, account metadata, Drive change token, settings, pins, and error/conflict events. The schema fixes the root inode, allocates persistent non-reused inodes, allows duplicate exact Drive names with distinct persisted visible names, and enforces unique Drive IDs, inode IDs, operation IDs/idempotency keys, and parent/display-name pairs.
+- Added transactional object creation, root bootstrap, foreign-key enforcement, mode `0600` for the database, migration SHA-256 checks, and documentation for migration versioning and backups before incompatible changes.
+- Driver: `mattn/go-sqlite3` v1.14.52 is provisional for the schema spike because the selected Qt stack already requires CGO. Compare it with a CGO-free SQLite driver during step 6 before fixing crash-durability settings or treating the driver choice as final.
+- Validation: `go test ./internal/store -count=1`, `go test ./...`, `go vet ./...`, `make build`, and `git diff --check` passed. Tests cover fresh/reopened databases, root and object inode stability, duplicate remote names, unique constraints, foreign keys, atomic failed inserts, and migration checksum protection.
+- Limitations: the visible-name collision suffix generator is for the Drive index step; content-file durability, WAL/synchronous policy, and forced-termination recovery are step 6. This step does not connect to Drive or FUSE.
 - Git commit: pending.
 
 ## Next
 
-Step 5: define the persistent domain model and SQLite metadata/queue schema.
+Step 6: implement durable content versions and the recovery journal, then run forced-termination tests.
 
