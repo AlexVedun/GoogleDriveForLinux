@@ -101,7 +101,17 @@
 - Limitations: `/dev/fuse` is unavailable in this environment, so no live mount was performed. The CLI requires a ready database produced outside this command; OAuth/indexing integration and content reads remain later work.
 - Git commit: `05e95c5` (`feat: expose stable Drive namespace through FUSE`).
 
+## Step 12 — version-stable reads and bounded cache
+
+- Added a streamed download pipeline that writes to a private temporary file using a fixed 128 KiB buffer. It checks Drive file ID/version/size/type and download permission before and after the stream, verifies exact byte count and Drive MD5 when provided, and records a local SHA-256 before publishing a complete cache row.
+- Added migration 4 for unique `(object_id, Drive version)` cache entries. The default evictable-cache limit is 1 GiB and can be overridden by the `contentcache.New` byte-limit argument. Files that cannot fit without evicting a pinned, locally dirty, or open version are served from a temporary file for that handle and removed on release.
+- Added verified offline cache reads and FUSE `open`/`read`/`release` handles using positional reads. Each handle stays attached to its immutable content version after the index advances. Interrupted downloads and corrupt cache entries are never returned as complete data; unsupported Workspace document types and network failures map to explicit FUSE errors.
+- Drive API choice: use `files.get?alt=media` for stored blobs and verify the indexed version around the download; the [download guide](https://developers.google.com/workspace/drive/api/guides/manage-downloads) and [revision guide](https://developers.google.com/workspace/drive/api/guides/manage-revisions) describe limitations on downloading older revisions. This implementation does not depend on historical-revision access.
+- Validation: full `make check` passed (`go test ./...`, `go vet ./...`, and both binary builds); `go test -race ./internal/store ./internal/contentcache ./internal/fusefs -count=1` and `git diff --check` passed. Fake-API tests cover a streamed 9 MiB file at multiple offsets, concurrent readers, interrupted/mismatched downloads, version changes during transfer, corrupt/offline cache, quota-boundary eviction, pin/dirty protection, and an open FUSE handle surviving a remote-version update.
+- Limitations: no live Google Drive account or `/dev/fuse` mount was available. `drivefs --database` and the Qt process are not yet wired to OAuth/indexing/cache construction, so the content path is tested through the injected FUSE reader and fake Drive API.
+- Git commit: `70804ff` (`feat: read Drive files through bounded disk cache`).
+
 ## Next
 
-Step 12: add version-stable reads through a bounded disk cache.
+Step 13: persist FUSE create/write/truncate/flush/fsync locally before acknowledging them.
 
