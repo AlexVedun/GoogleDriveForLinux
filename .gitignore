@@ -1,0 +1,24 @@
+# Go build outputs
+/bin/
+/dist/
+/build/
+*.AppImage
+AppDir/
+
+# Local application state and credentials
+.env
+*.db
+*.db-shm
+*.db-wal
+/data/
+/cache/
+/runtime/
+client_secret*.json
+oauth*.json
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
