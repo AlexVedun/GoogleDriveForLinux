@@ -11,7 +11,9 @@ Before using a real account:
 3. Create an OAuth client with application type **Desktop app**. Keep the downloaded client configuration outside the repository and do not put account tokens in source files, command history, screenshots, or issue reports.
 4. Review Google's current verification and restricted-scope requirements before distributing the application. This prototype requests `https://www.googleapis.com/auth/drive` because the planned filesystem reads and writes arbitrary files in My Drive.
 
-The client ID is passed to `auth.NewService`. The optional client secret can be supplied through `auth.Config.ClientSecret` if the downloaded desktop-client configuration provides one. The application UI and its local settings flow are scheduled for a later implementation step; this package does not currently read environment variables or perform a live sign-in on startup.
+The per-user `drivefs` service reads the desktop OAuth client ID from `GOOGLE_OAUTH_CLIENT_ID`. Set it in the environment used to start `driveapp`; the GUI passes that environment to the service it launches. If a private Secret Service is available, the service opens its sign-in flow from the Qt window. The optional client secret can be supplied through `auth.Config.ClientSecret` when a desktop-client configuration requires one; the packaged build does not embed a secret.
+
+After authorization, `drivefs` creates the Drive API client, recovers the durable content journal, starts the initial My Drive index, drains queued operations, and downloads pinned files in the background. An already stored credential starts these workers when the service starts. Signing out unmounts the filesystem and stops the workers before revoking the token. The Qt account status reports when Drive asks for reauthorization; no successful live Google login has been verified in this repository's test environment.
 
 ```go
 secrets, err := secretstore.NewSystemStore("google-drive-linux")

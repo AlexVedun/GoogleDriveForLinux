@@ -164,7 +164,15 @@
 - Lifecycle tests cover active-socket detection, stale-socket replacement, bad directory/file permissions, version mismatch, idempotent mount/unmount/quit, simulated mount-process exit, and preservation of a queued folder operation. No live `/dev/fuse` mount was possible. GUI disconnect during a real active upload is not covered because the sync worker is not yet connected to the service; the namespace mounted by this service is currently read-only.
 - Git commit: `851de3d` (`feat: connect Qt app and filesystem over local IPC`).
 
+## Step 19 — Qt controls and connected synchronization status
+
+- Replaced the Qt spike with status, queue, conflicts, offline pins, settings, and event views. Added account sign-in/sign-out, mountpoint selection, mount/unmount, close-to-tray, and explicit quit controls; the Qt event loop remains the only place that updates widgets.
+- Connected the per-user service to OAuth, the Drive API, journal recovery, initial and incremental indexing, durable queue processing, the content cache, and offline pin prefetch. Existing credentials start synchronization when the service launches; signing in starts it after authorization, and signing out unmounts and stops it before token revocation. A failed revocation restarts the authenticated runtime.
+- The service mounts writable FUSE when its authenticated sync runtime is available and keeps the explicit indexed read-only mode for a service without OAuth. Cache limit changes reach a running cache; pin changes wake prefetch. IPC status now carries network/auth, sync, cache/disk, and pin progress/error states.
+- Validation: `go test ./internal/syncservice ./internal/drivecontrol ./cmd/drivefs -count=1`, `go test ./internal/app -count=1`, `go vet ./internal/syncservice ./internal/drivecontrol ./internal/app ./cmd/drivefs`, and `make qt-smoke` passed. The service tests include a fake-Drive initial index and a live cache-limit update; offscreen Qt smoke verifies that background status reaches the GUI event loop. Full `go test ./...`, `go vet ./...`, and the race suite remain in step 21.
+- Limitations: no real Google account, Secret Service session, `/dev/fuse` mount, or visible GNOME/KDE session is available here. The Qt controls and live authenticated upload/download path still need a desktop/account check. The sync runtime uses the existing worker's retry, resume, and conflict behavior; it does not eliminate Drive's documented update race window.
+
 ## Next
 
-Step 19: full Qt controls and sync status views.
+Step 20: produce and verify the x86_64 AppImage.
 

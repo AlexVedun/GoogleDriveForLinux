@@ -22,6 +22,7 @@ const (
 	CommandPinsList        Command = "pins.list"
 	CommandPin             Command = "pins.pin"
 	CommandUnpin           Command = "pins.unpin"
+	CommandSignIn          Command = "account.sign_in"
 	CommandMount           Command = "mount"
 	CommandUnmount         Command = "unmount"
 	CommandSignOut         Command = "account.sign_out"

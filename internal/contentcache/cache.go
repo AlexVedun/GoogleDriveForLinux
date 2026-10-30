@@ -66,6 +66,31 @@ func New(drive driveapi.API, metadata *store.Store, content *store.ContentStore,
 		refs: make(map[domain.ContentVersionID]int), lastUsed: make(map[domain.ContentVersionID]time.Time)}, nil
 }
 
+func (c *Cache) SetMaxBytes(maxBytes int64) error {
+	if c == nil {
+		return errors.New("content cache is not initialized")
+	}
+	if maxBytes == 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	if maxBytes < 0 {
+		return errors.New("cache size limit must not be negative")
+	}
+	c.mu.Lock()
+	c.maxBytes = maxBytes
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Cache) MaxBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxBytes
+}
+
 func (c *Cache) Open(ctx context.Context, object domain.Object) (*Handle, error) {
 	return c.open(ctx, object, nil)
 }
@@ -176,7 +201,7 @@ func (c *Cache) open(ctx context.Context, object domain.Object, progress func(do
 		_ = c.content.DiscardStagedContent(staged)
 		return nil, fmt.Errorf("check offline pin before publishing download: %w", err)
 	}
-	if pinned || staged.Size <= c.maxBytes {
+	if pinned || staged.Size <= c.MaxBytes() {
 		if handle, err := c.publishWithinLimit(ctx, object, staged); err == nil {
 			return handle, nil
 		} else if !errors.Is(err, errCacheLimitUnavailable) {

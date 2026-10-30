@@ -2,11 +2,11 @@
 
 Go and Qt 6 desktop client that mounts a user's Google Drive **My Drive** folder through FUSE.
 
-The product is at the prototype stage. The repository has a local-only FUSE loopback spike, a read-only CLI mount, an injectable indexed FUSE implementation for versioned reads and locally durable writes, plus a Qt 6 Widgets window/tray spike and OAuth, Drive API, indexing, polling, bounded content-cache, and durable queue-worker packages. Login, index creation, the writable mount, and scheduled synchronization are not yet wired into one application flow. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
+The product is at the prototype stage. The per-user service and Qt client now share OAuth, initial and incremental indexing, a bounded content cache, durable queued writes, resumable uploads, offline pin downloads, conflict status, and a writable FUSE mount. The GUI can sign in, mount/unmount, show the queue and conflicts, manage pins, change the cache limit, and quit the service. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
 
 The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md); unresolved technical choices are tracked in [docs/decisions.md](docs/decisions.md).
 
-OAuth setup, Secret Service requirements, and the limits of the current sign-in implementation are documented in [docs/oauth.md](docs/oauth.md).
+OAuth setup, Secret Service requirements, and sign-in behavior are documented in [docs/oauth.md](docs/oauth.md).
 
 Drive API error categories and retry policy are documented in [docs/drive-api-errors.md](docs/drive-api-errors.md).
 
@@ -21,13 +21,13 @@ make qt-smoke
 
 Building requires Go, a C++ compiler, `pkg-config`, Qt 6 Widgets development files, and the Qt Wayland plugin package. The MIQT Qt 6 package generates a large set of C++ wrappers, so the first Qt build can take several minutes. FUSE device access is required to run mount integration tests.
 
-`make appimage` downloads pinned linuxdeploy tools into the ignored `.tools/` directory, verifies their SHA-256 digests, and produces `dist/Google_Drive_for_Linux-x86_64.AppImage`. The packaging tools are fetched from the official [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy), [Qt plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-qt), and [AppImage plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-appimage) releases. The Drive API adapter is not yet connected to the indexed `drivefs` mount or Qt app.
+`make appimage` downloads pinned linuxdeploy tools into the ignored `.tools/` directory, verifies their SHA-256 digests, and produces `dist/Google_Drive_for_Linux-x86_64.AppImage`. The packaging tools are fetched from the official [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy), [Qt plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-qt), and [AppImage plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-appimage) releases.
 
-The `drivefs` command still supports a **local FUSE loopback spike** for protocol testing: `./bin/drivefs --source SOURCE_DIR --mountpoint MOUNT_DIR` uses an existing empty mount directory and a separate disposable source directory. For an already populated, ready SQLite index, `./bin/drivefs --database PATH --mountpoint DIR` mounts the metadata namespace read-only. The internal indexed FUSE API also supports local folder/file creation, rename/move, trash, and durable write queuing when constructed with the content store; the `internal/syncworker` package executes those queue operations with dependency ordering and resumable-upload recovery. The write-enabled mount, sync worker, Google login, and index creation are not wired into the command yet. Run `./scripts/fuse-smoke.sh` for the destructive-operation loopback test; it creates and removes files only in its own temporary directory.
+The direct `drivefs --source SOURCE_DIR --mountpoint MOUNT_DIR` mode remains a **local FUSE loopback spike** for protocol tests. The normal Qt app starts one per-user `drivefs --ipc-server` service. Set `GOOGLE_OAUTH_CLIENT_ID` before launching `driveapp` (for example, `GOOGLE_OAUTH_CLIENT_ID=your-desktop-client-id ./bin/driveapp`); after signing in, the service indexes My Drive and enables the write-enabled FUSE mount. Without OAuth configuration, a ready index can still be mounted read-only. Run `./scripts/fuse-smoke.sh` for the loopback test; it creates and removes files only in its own temporary directory.
 
 ## Data safety contract
 
-In the internal write-enabled FUSE implementation, a successful local `flush` or `fsync` means that file contents and the queued change are durably stored locally. It does not mean that the change has reached Google Drive. The sync worker advances the operation asynchronously and commits it only after verifying the Drive result. The Qt prototype explains the local state as “Saved locally; waiting to upload to Google Drive.” Pending data must survive restarts and must not be evicted from the cache. The CLI and GUI do not yet share live queue status.
+In the write-enabled FUSE implementation, a successful local `flush` or `fsync` means that file contents and the queued change are durably stored locally. It does not mean that the change has reached Google Drive. The sync worker advances the operation asynchronously and commits it only after verifying the Drive result. The Qt queue shows local pending work separately from confirmed Drive uploads. Pending data must survive restarts and must not be evicted from the cache.
 
 When a remote edit is detected before or after an upload, the implementation keeps the remote file and saves local bytes under a neighboring “local conflict” filename. Namespace conflicts retain the requested rename/trash operation for an explicit choice. Google Drive does not document an atomic version precondition for `files.update`, so an edit made after the worker's preflight read and before its update can still be overwritten without detection; the client does not claim race-free conflict protection.
 

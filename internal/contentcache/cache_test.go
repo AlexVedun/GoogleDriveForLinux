@@ -246,6 +246,28 @@ func TestCacheEvictionHonorsQuotaAndOpenHandles(t *testing.T) {
 	}
 }
 
+func TestCacheLimitCanBeUpdatedWhileInUse(t *testing.T) {
+	metadata, content := cacheFixture(t, "object-cache-limit", "version-cache-limit", 0)
+	defer metadata.Close()
+	drive := &cacheFakeDrive{}
+	cache, err := New(drive, metadata, content, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cache.MaxBytes(); got != 256 {
+		t.Fatalf("initial cache limit = %d", got)
+	}
+	if err := cache.SetMaxBytes(512); err != nil {
+		t.Fatal(err)
+	}
+	if got := cache.MaxBytes(); got != 512 {
+		t.Fatalf("updated cache limit = %d", got)
+	}
+	if err := cache.SetMaxBytes(-1); err == nil {
+		t.Fatal("negative cache limit was accepted")
+	}
+}
+
 func TestPinManagerDownloadsOutsideCacheLimitAndReportsProgress(t *testing.T) {
 	ctx := context.Background()
 	metadata, content := cacheFixture(t, "object-pinned", "pinned-v1", 3)

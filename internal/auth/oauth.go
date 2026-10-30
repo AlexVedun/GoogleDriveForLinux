@@ -219,6 +219,22 @@ func (s *Service) TokenSource(ctx context.Context) (oauth2.TokenSource, error) {
 	}, nil
 }
 
+// IsAuthenticated checks for a locally stored credential without contacting
+// Google or attempting a token refresh.
+func (s *Service) IsAuthenticated(ctx context.Context) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("context must not be nil")
+	}
+	_, err := s.loadToken(ctx)
+	if errors.Is(err, ErrNotAuthenticated) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Service) Revoke(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context must not be nil")

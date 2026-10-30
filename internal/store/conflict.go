@@ -17,26 +17,26 @@ const (
 )
 
 type ConflictCopy struct {
-	OperationID       domain.OperationID
-	RemoteObjectID    domain.ObjectID
-	LocalCopyObjectID domain.ObjectID
-	LocalCopyName     string
-	RemoteName        string
-	RemoteVersion     string
+	OperationID       domain.OperationID `json:"operation_id"`
+	RemoteObjectID    domain.ObjectID    `json:"remote_object_id"`
+	LocalCopyObjectID domain.ObjectID    `json:"local_copy_object_id"`
+	LocalCopyName     string             `json:"local_copy_name"`
+	RemoteName        string             `json:"remote_name"`
+	RemoteVersion     string             `json:"remote_version"`
 }
 
 type ConflictRecord struct {
-	EventID            domain.EventID
-	OperationID        domain.OperationID
-	ObjectID           domain.ObjectID
-	Code               string
-	LocalOperationKind domain.OperationKind
-	LocalIntent        string
-	LocalCopyObjectID  domain.ObjectID
-	LocalCopyName      string
-	RemoteName         string
-	RemoteVersion      string
-	CreatedAt          time.Time
+	EventID            domain.EventID       `json:"event_id"`
+	OperationID        domain.OperationID   `json:"operation_id"`
+	ObjectID           domain.ObjectID      `json:"object_id"`
+	Code               string               `json:"code"`
+	LocalOperationKind domain.OperationKind `json:"local_operation_kind"`
+	LocalIntent        string               `json:"local_intent"`
+	LocalCopyObjectID  domain.ObjectID      `json:"local_copy_object_id"`
+	LocalCopyName      string               `json:"local_copy_name"`
+	RemoteName         string               `json:"remote_name"`
+	RemoteVersion      string               `json:"remote_version"`
+	CreatedAt          time.Time            `json:"created_at"`
 }
 
 func (s *Store) Conflicts(ctx context.Context) ([]ConflictRecord, error) {

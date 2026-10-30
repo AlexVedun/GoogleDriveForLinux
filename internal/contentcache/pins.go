@@ -132,5 +132,5 @@ func (m *PinManager) OverLimitBytes(ctx context.Context) (int64, error) {
 	if m == nil || m.metadata == nil || m.cache == nil {
 		return 0, errors.New("pin manager is not initialized")
 	}
-	return m.metadata.ProtectedContentOverage(ctx, m.cache.maxBytes)
+	return m.metadata.ProtectedContentOverage(ctx, m.cache.MaxBytes())
 }
