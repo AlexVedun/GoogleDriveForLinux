@@ -171,6 +171,7 @@
 - The service mounts writable FUSE when its authenticated sync runtime is available and keeps the explicit indexed read-only mode for a service without OAuth. Cache limit changes reach a running cache; pin changes wake prefetch. IPC status now carries network/auth, sync, cache/disk, and pin progress/error states.
 - Validation: `go test ./internal/syncservice ./internal/drivecontrol ./cmd/drivefs -count=1`, `go test ./internal/app -count=1`, `go vet ./internal/syncservice ./internal/drivecontrol ./internal/app ./cmd/drivefs`, and `make qt-smoke` passed. The service tests include a fake-Drive initial index and a live cache-limit update; offscreen Qt smoke verifies that background status reaches the GUI event loop. Full `go test ./...`, `go vet ./...`, and the race suite remain in step 21.
 - Limitations: no real Google account, Secret Service session, `/dev/fuse` mount, or visible GNOME/KDE session is available here. The Qt controls and live authenticated upload/download path still need a desktop/account check. The sync runtime uses the existing worker's retry, resume, and conflict behavior; it does not eliminate Drive's documented update race window.
+- Git commit: `bb14f17` (`feat: add Qt controls and sync status views`).
 
 ## Next
 
