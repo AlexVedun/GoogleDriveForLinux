@@ -145,6 +145,8 @@
 - The worker compares the base Drive version before updating and reads the file after upload. If the postflight read finds another newer state, it preserves local bytes as a conflict file. These checks are best-effort: Google Drive v3 `files.update` documents no atomic version precondition/If-Match contract; a change between preflight and update can still be overwritten without detection. No live concurrent-account test is available.
 - Validation: `go test ./internal/store ./internal/indexer ./internal/syncworker -count=1` passed. It covers poller conflict preservation across restart and remote deletion, conflict resolution, local rename rebase, own-operation markers, and a Drive edit arriving during upload. Full checks are recorded after final validation below.
 - Limitations: real-account concurrency, visible Qt conflict controls, and a mounted FUSE conflict workflow remain unverified. The API's lack of documented conditional update semantics leaves a narrow overwrite race.
+- Git commit: `2119c7b` (`feat: preserve both versions on sync conflicts`).
+- Journal commit: `477fd9a` (`docs: record conflict preservation milestone`).
 
 ## Step 17 — recursive offline pins and space protection
 
@@ -154,6 +156,7 @@
 - Validation: `go test ./internal/store ./internal/contentcache -count=1`, `go test -race ./internal/store ./internal/contentcache -count=1`, `go vet ./internal/store ./internal/contentcache`, and `git diff --check` passed. Tests cover migration from schema 1, recursive inheritance for newly discovered files, pin/unpin eviction behavior, download progress, downloads larger than the configured cache limit, and metadata accounting for over 1 GiB of protected content.
 - Limitations: the >1 GiB quota test simulates Drive size in SQLite metadata rather than downloading a physical 1 GiB file. `/dev/fuse` and a live Drive account are unavailable. The GUI display is step 19; the worker is not yet triggered by the IPC/process lifecycle.
 - Git commit: `6902f28` (`feat: add offline pins and disk space guard`).
+- Journal commit: `c3b6c55` (`docs: record offline pinning milestone`).
 
 ## Step 18 — local IPC and process lifecycle
 
@@ -188,7 +191,7 @@
 - Race validation: focused race suites for store, content cache, FUSE, indexer, Drive API, worker, IPC, and controller passed in earlier steps. The aggregate `go test -race ./...` did not complete: the parallel attempt hit `/tmp` quota, and a serial retry restarted the generated MIQT/Qt C++ build and was stopped. This remains less evidence than a successful full race run.
 - Release limitations: ordinary AppImage launch is blocked here by missing `fusermount` and `/dev/fuse`; there was no real Google account or mounted FUSE test, active Secret Service, visible GNOME/KDE session, or oldest-system compatibility check. The OAuth scope is restricted and the public review has not been submitted. The project has not selected a source-code license. Do not treat the AppImage as a public release.
 - Git commit: `b8ebf31` (`build: inventory bundled AppImage licenses`).
-- Git commit: pending final documentation commit.
+- Git commit: `890fcf6` (`docs: record release validation and operating guide`).
 
 ## Completion status
 
