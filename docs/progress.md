@@ -61,7 +61,7 @@
 - Documented manual Google Cloud setup and current sign-in boundaries in `docs/oauth.md`; no real credentials or account data are stored in the repository. The UI does not yet collect client settings or invoke sign-in; that wiring belongs to later app steps.
 - Validation: `go test ./internal/auth ./internal/secretstore -count=1` passed with local loopback access. Tests cover PKCE, wrong-state rejection, valid callback, callback timeout, access denial, successful refresh and token rotation, invalid grant, credential-store failures, and revoke behavior. The secret-store suite covers round-trip/delete, missing entries, sanitized failures, and deadlines. No real Google account or live GNOME/KDE keyring was used.
 - Limitations: this execution sandbox blocks loopback sockets by default, so the OAuth unit suite required an escalated test invocation. Live Google login, browser behavior, and GNOME Keyring/KDE Wallet availability remain unverified.
-- Git commit: pending.
+- Git commit: `5594fc9` (`feat: add desktop OAuth and secure token storage`).
 
 ## Next
 
