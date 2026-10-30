@@ -146,7 +146,16 @@
 - Validation: `go test ./internal/store ./internal/indexer ./internal/syncworker -count=1` passed. It covers poller conflict preservation across restart and remote deletion, conflict resolution, local rename rebase, own-operation markers, and a Drive edit arriving during upload. Full checks are recorded after final validation below.
 - Limitations: real-account concurrency, visible Qt conflict controls, and a mounted FUSE conflict workflow remain unverified. The API's lack of documented conditional update semantics leaves a narrow overwrite race.
 
+## Step 17 — recursive offline pins and space protection
+
+- Added schema migration 5 for recursive folder pins, preserving older folder-pin intent during upgrade. Direct file pins and folder pins are stored once; effective status is derived from the indexed parent chain, so newly indexed descendants inherit the rule. The cache eviction query checks the full ancestor chain.
+- Added `contentcache.PinManager` to enumerate pinned Drive blobs, prefetch and verify them, report per-file byte progress, continue across individual failures, and report protected-data overage. Newly downloaded pinned blobs use the private pinned directory and bypass the ordinary cache limit. Existing cached content is protected logically and can be evicted after unpinning. Startup recovery also removes generated orphans from the pinned directory.
+- The durable-write reservation already enforces the 10% free-space floor and reserves bytes across concurrent writers. Existing tests cover overlapping reservations, threshold rejection, `ENOSPC` mapping, and preservation of the preceding acknowledged version; step 17 retains that behavior.
+- Validation: `go test ./internal/store ./internal/contentcache -count=1`, `go test -race ./internal/store ./internal/contentcache -count=1`, `go vet ./internal/store ./internal/contentcache`, and `git diff --check` passed. Tests cover migration from schema 1, recursive inheritance for newly discovered files, pin/unpin eviction behavior, download progress, downloads larger than the configured cache limit, and metadata accounting for over 1 GiB of protected content.
+- Limitations: the >1 GiB quota test simulates Drive size in SQLite metadata rather than downloading a physical 1 GiB file. `/dev/fuse` and a live Drive account are unavailable. The GUI display is step 19; the worker is not yet triggered by the IPC/process lifecycle.
+- Git commit: `6902f28` (`feat: add offline pins and disk space guard`).
+
 ## Next
 
-Step 17: recursive offline pins and low-space handling.
+Step 18: safe local IPC and process lifecycle.
 

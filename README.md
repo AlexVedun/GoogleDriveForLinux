@@ -31,3 +31,5 @@ In the internal write-enabled FUSE implementation, a successful local `flush` or
 
 When a remote edit is detected before or after an upload, the implementation keeps the remote file and saves local bytes under a neighboring “local conflict” filename. Namespace conflicts retain the requested rename/trash operation for an explicit choice. Google Drive does not document an atomic version precondition for `files.update`, so an edit made after the worker's preflight read and before its update can still be overwritten without detection; the client does not claim race-free conflict protection.
 
+Offline pins protect files from cache eviction. Pinning a folder includes its descendants and children discovered later. Pinned and queued content may exceed the ordinary cache limit; the local worker reports download progress and the protected-data overage. New durable writes are refused if they would leave less than 10% of the backing filesystem free.
+
