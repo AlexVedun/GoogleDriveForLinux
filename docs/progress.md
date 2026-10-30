@@ -63,7 +63,17 @@
 - Limitations: this execution sandbox blocks loopback sockets by default, so the OAuth unit suite required an escalated test invocation. Live Google login, browser behavior, and GNOME Keyring/KDE Wallet availability remain unverified.
 - Git commit: `5594fc9` (`feat: add desktop OAuth and secure token storage`).
 
+## Step 8 — Google Drive API adapter and fake server
+
+- Added a narrow Drive v3 REST client for paged `files.list`, `files.get`, metadata-only create/update, streamed download, trash, rename/move, start/change tokens, generated IDs, and resumable upload session creation, chunk transfer, and status queries.
+- File and change requests select explicit `fields`. Drive error bodies are reduced to stable categories and reason codes; human-readable messages are not surfaced. Recognized rate-limit reasons, `429`, and `5xx` receive bounded exponential backoff with jitter for safe reads. Context cancels retry waits; request concurrency and per-request deadlines are bounded.
+- Mutating requests are not blindly retried after uncertain outcomes. Resumable upload chunks return the confirmed offset or completed file, and interrupted sessions can be queried before another chunk is sent. Upload session URLs must stay on the configured origin, and cross-origin redirects are not followed.
+- Documented error-to-state mapping and retry behavior in `docs/drive-api-errors.md`; updated README to clarify the new adapter is not yet wired into `drivefs` or the Qt app.
+- Validation: local fake-server tests cover pagination, metadata fields, CRUD/move/trash, streamed download, changes, generated IDs, resumable start/chunk/status/completion, expired sessions, 401, distinct 403 reasons, 404, 429, 5xx, connection reset, retry cancellation, no retry for ambiguous mutations, cross-origin redirect rejection, request limits, and input validation. `go test -race ./internal/driveapi -count=1` passed. No requests were sent to Google.
+- Limitations: only fake-server behavior is verified; Google Cloud project quotas, actual token refresh over HTTP, live Drive data, and real resumable-session behavior remain unverified.
+- Git commit: pending.
+
 ## Next
 
-Step 8: implement the narrow Google Drive API adapter and deterministic fake server.
+Step 9: implement initial My Drive indexing with a start token captured before paginated traversal and a catch-up changes pass.
 
