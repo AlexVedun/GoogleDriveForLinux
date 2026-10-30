@@ -53,6 +53,15 @@ type ContentPaths struct {
 	Pinned         string
 	Transient      string
 	Pending        string
+	Working        string
+}
+
+// WorkingFile is a private mutable file shared by the open descriptors of one FUSE inode.
+// It is temporary; WritePending publishes an immutable durable snapshot before fsync succeeds.
+type WorkingFile struct {
+	file *os.File
+	path string
+	root string
 }
 
 type RecoveryReport struct {
@@ -105,13 +114,14 @@ func NewContentStore(metadata *Store, root string) (*ContentStore, error) {
 		Pinned:         filepath.Join(cacheRoot, "pinned"),
 		Transient:      filepath.Join(cacheRoot, "transient"),
 		Pending:        filepath.Join(absoluteRoot, "pending"),
+		Working:        filepath.Join(absoluteRoot, "working"),
 	}
-	for _, directory := range []string{paths.Root, cacheRoot, paths.EvictableCache, paths.Pinned, paths.Transient, paths.Pending} {
+	for _, directory := range []string{paths.Root, cacheRoot, paths.EvictableCache, paths.Pinned, paths.Transient, paths.Pending, paths.Working} {
 		if err := ensurePrivateDirectory(directory); err != nil {
 			return nil, err
 		}
 	}
-	for _, directory := range []string{paths.Root, cacheRoot, paths.EvictableCache, paths.Transient, paths.Pending} {
+	for _, directory := range []string{paths.Root, cacheRoot, paths.EvictableCache, paths.Transient, paths.Pending, paths.Working} {
 		if err := syncDirectory(directory); err != nil {
 			return nil, fmt.Errorf("sync content directory %q: %w", directory, err)
 		}
@@ -121,6 +131,83 @@ func NewContentStore(metadata *Store, root string) (*ContentStore, error) {
 
 func (s *ContentStore) Paths() ContentPaths {
 	return s.paths
+}
+
+// NewWorkingFile creates a private mutable copy of source. The copy is bounded and checked
+// against expectedSize so an incomplete remote read cannot become an editable file.
+func (s *ContentStore) NewWorkingFile(ctx context.Context, expectedSize int64, source io.Reader) (*WorkingFile, error) {
+	if ctx == nil || source == nil {
+		return nil, errors.New("context and working file source are required")
+	}
+	if expectedSize < 0 || expectedSize >= math.MaxInt64 {
+		return nil, errors.New("working file size is outside the supported range")
+	}
+	token, err := randomContentToken()
+	if err != nil {
+		return nil, fmt.Errorf("create working file ID: %w", err)
+	}
+	path := filepath.Join(s.paths.Working, "working-"+token+".tmp")
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create working file: %w", err)
+	}
+	cleanup := func(cause error) (*WorkingFile, error) {
+		closeErr := file.Close()
+		removeErr := os.Remove(path)
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+		return nil, errors.Join(cause, closeErr, removeErr)
+	}
+	size, copyErr := copyWithContext(ctx, file, io.LimitReader(source, expectedSize))
+	if copyErr == nil && size != expectedSize {
+		copyErr = fmt.Errorf("working file source contains %d bytes, expected %d", size, expectedSize)
+	}
+	if copyErr == nil {
+		var extra [1]byte
+		read, extraErr := (contextReader{ctx: ctx, source: source}).Read(extra[:])
+		if read > 0 {
+			copyErr = fmt.Errorf("working file source exceeds expected size of %d bytes", expectedSize)
+		} else if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+			copyErr = fmt.Errorf("check working file source size: %w", extraErr)
+		}
+	}
+	if copyErr != nil {
+		return cleanup(fmt.Errorf("copy working file source: %w", copyErr))
+	}
+	if err := file.Sync(); err != nil {
+		return cleanup(fmt.Errorf("sync initial working file: %w", err))
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return cleanup(fmt.Errorf("rewind initial working file: %w", err))
+	}
+	return &WorkingFile{file: file, path: path, root: s.paths.Working}, nil
+}
+
+func (f *WorkingFile) File() *os.File {
+	if f == nil {
+		return nil
+	}
+	return f.file
+}
+
+func (f *WorkingFile) Remove() error {
+	if f == nil {
+		return nil
+	}
+	var closeErr error
+	if f.file != nil {
+		closeErr = f.file.Close()
+		f.file = nil
+	}
+	removeErr := os.Remove(f.path)
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	if removeErr == nil && closeErr == nil {
+		removeErr = syncDirectory(f.root)
+	}
+	return errors.Join(closeErr, removeErr)
 }
 
 func (s *ContentStore) WritePending(ctx context.Context, request WriteRequest, source io.Reader) (WriteResult, error) {
@@ -313,8 +400,41 @@ func (s *ContentStore) Recover(ctx context.Context) (RecoveryReport, error) {
 	if err != nil {
 		return report, err
 	}
-	report.RemovedOrphanFiles = removed
+	workingRemoved, err := s.removeAbandonedWorkingFiles(ctx)
+	if err != nil {
+		return report, err
+	}
+	report.RemovedOrphanFiles = removed + workingRemoved
 	return report, nil
+}
+
+func (s *ContentStore) removeAbandonedWorkingFiles(ctx context.Context) (int, error) {
+	entries, err := os.ReadDir(s.paths.Working)
+	if err != nil {
+		return 0, fmt.Errorf("list abandoned working files: %w", err)
+	}
+	removed := 0
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
+		if !generatedWorkingFileName(entry.Name()) {
+			continue
+		}
+		deleted, err := removeRegularFile(filepath.Join(s.paths.Working, entry.Name()))
+		if err != nil {
+			return removed, err
+		}
+		if deleted {
+			removed++
+		}
+	}
+	if removed > 0 {
+		if err := syncDirectory(s.paths.Working); err != nil {
+			return removed, fmt.Errorf("sync abandoned working file cleanup: %w", err)
+		}
+	}
+	return removed, nil
 }
 
 func (s *ContentStore) createPrepared(ctx context.Context, request WriteRequest, versionID domain.ContentVersionID) (domain.Operation, error) {
@@ -1008,6 +1128,14 @@ func generatedDownloadFileName(name string) bool {
 		return false
 	}
 	return contentIDPattern.MatchString("cv-" + strings.TrimSuffix(strings.TrimPrefix(name, ".download-"), ".tmp"))
+}
+
+func generatedWorkingFileName(name string) bool {
+	if !strings.HasPrefix(name, "working-") || !strings.HasSuffix(name, ".tmp") {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.TrimSuffix(strings.TrimPrefix(name, "working-"), ".tmp"))
+	return err == nil && len(decoded) == 16
 }
 
 func validSHA256(value string) bool {

@@ -8,6 +8,8 @@ Each connection enables foreign-key checks, a 5 second busy timeout, WAL mode, `
 
 Every pending write supplies its expected snapshot size. Before creating a prepared row, the content store reserves that many available bytes under a shared in-process lock and requires at least 10% of the filesystem to remain available. The reservation is released as file bytes are accepted or when the write finishes; actual `write`, `fsync`, rename, and SQLite errors still propagate and leave the previous acknowledged version intact.
 
+Open writable FUSE handles share one private mutable file under `working/` per local object. `flush` and `fsync` sync that file and publish an immutable pending snapshot plus queue operation before returning success. Those snapshots are independent of the mutable working file. `Recover` removes generated working files left by a process crash; an edit that did not complete a successful `flush` or `fsync` is not promised to survive a crash.
+
 ## Identity and visible names
 
 - `object_id` is the stable local object identity. It is assigned before a remote Drive object exists and remains stable when a Drive `fileId` is later attached.

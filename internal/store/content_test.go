@@ -93,6 +93,43 @@ func TestWritePendingPersistsZeroAndLargeFiles(t *testing.T) {
 	}
 }
 
+func TestWorkingFilesArePrivateAndRemovedDuringRecovery(t *testing.T) {
+	metadata, content := openContentFixture(t)
+	defer metadata.Close()
+	working, err := content.NewWorkingFile(context.Background(), 4, strings.NewReader("data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(working.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("working file mode = %v; want 0600", info.Mode().Perm())
+	}
+	if _, err := working.File().WriteAt([]byte("work"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := working.File().Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a process crash: keep the generated file but lose its descriptor.
+	working.file = nil
+	report, err := content.Recover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RemovedOrphanFiles != 1 {
+		t.Fatalf("recovery removed %d orphan files, want 1", report.RemovedOrphanFiles)
+	}
+	if _, err := os.Stat(working.path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned working file remains after recovery: %v", err)
+	}
+	if _, err := content.NewWorkingFile(context.Background(), 5, strings.NewReader("tiny")); err == nil {
+		t.Fatal("working file accepted a source shorter than its expected size")
+	}
+}
+
 func TestWritePendingIdempotencyReturnsExistingVersion(t *testing.T) {
 	metadata, content := openContentFixture(t)
 	defer metadata.Close()

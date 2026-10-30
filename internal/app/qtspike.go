@@ -27,6 +27,8 @@ func RunQtSpike(smoke bool) int {
 	layout := qt.NewQVBoxLayout(centralWidget)
 	statusLabel := qt.NewQLabel3("Starting Qt UI prototype…")
 	layout.AddWidget(statusLabel.QWidget)
+	queueStatus := qt.NewQLabel3("After a local save, the status will read: “Saved locally; waiting to upload to Google Drive.”")
+	layout.AddWidget(queueStatus.QWidget)
 	chooseFolder := qt.NewQPushButton3("Choose a folder")
 	chooseFolder.OnClicked(func() {
 		selected := qt.QFileDialog_GetExistingDirectory2(window.QWidget, "Choose a folder")

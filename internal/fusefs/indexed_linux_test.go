@@ -351,11 +351,14 @@ func openIndexedTestStore(t *testing.T, count int) *store.Store {
 
 type indexedReadDrive struct {
 	driveapi.API
-	file    driveapi.File
-	payload []byte
+	file          driveapi.File
+	payload       []byte
+	getCalls      int
+	downloadCalls int
 }
 
 func (d *indexedReadDrive) GetFile(ctx context.Context, fileID string) (driveapi.File, error) {
+	d.getCalls++
 	if err := ctx.Err(); err != nil {
 		return driveapi.File{}, err
 	}
@@ -366,6 +369,7 @@ func (d *indexedReadDrive) GetFile(ctx context.Context, fileID string) (driveapi
 }
 
 func (d *indexedReadDrive) DownloadFile(ctx context.Context, fileID string) (driveapi.Download, error) {
+	d.downloadCalls++
 	if err := ctx.Err(); err != nil {
 		return driveapi.Download{}, err
 	}

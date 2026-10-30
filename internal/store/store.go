@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -30,8 +32,9 @@ const (
 var sqliteDriverRegistration sync.Once
 
 var (
-	ErrNewerSchema      = errors.New("database schema is newer than this application")
-	ErrChangedMigration = errors.New("applied database migration checksum changed")
+	ErrNewerSchema          = errors.New("database schema is newer than this application")
+	ErrChangedMigration     = errors.New("applied database migration checksum changed")
+	ErrDirectoryEntryExists = errors.New("directory entry already exists")
 )
 
 type Store struct {
@@ -329,12 +332,85 @@ func (s *Store) CreateObject(ctx context.Context, object domain.Object, entry do
 	if _, err := tx.ExecContext(ctx, `INSERT INTO directory_entries (
 		parent_object_id, object_id, remote_name, display_name
 	) VALUES (?, ?, ?, ?)`, string(entry.ParentID), string(entry.ObjectID), entry.RemoteName, entry.DisplayName); err != nil {
+		var sqliteErr sqlite3.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey {
+			return domain.Object{}, ErrDirectoryEntryExists
+		}
 		return domain.Object{}, fmt.Errorf("insert directory entry: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.Object{}, fmt.Errorf("commit object metadata: %w", err)
 	}
 	return object, nil
+}
+
+func (s *Store) CreateLocalFile(ctx context.Context, parentID domain.ObjectID, name, mimeType string) (domain.Object, error) {
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return domain.Object{}, fmt.Errorf("generate local object ID: %w", err)
+	}
+	objectID := domain.ObjectID("local:" + hex.EncodeToString(token[:]))
+	return s.CreateObject(ctx, domain.Object{
+		ID: objectID, MIMEType: mimeType, CapabilitiesJSON: `{"canEdit":true}`,
+	}, domain.DirectoryEntry{
+		ParentID: parentID, ObjectID: objectID, RemoteName: name, DisplayName: name,
+	})
+}
+
+func (s *Store) DiscardUnqueuedLocalFile(ctx context.Context, objectID domain.ObjectID) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin unqueued local file cleanup: %w", err)
+	}
+	defer tx.Rollback()
+	var driveFileID sql.NullString
+	var operations, contentVersions int
+	if err := tx.QueryRowContext(ctx, `SELECT drive_file_id FROM objects WHERE object_id = ?`, string(objectID)).Scan(&driveFileID); err != nil {
+		return fmt.Errorf("read local file before cleanup: %w", err)
+	}
+	if driveFileID.Valid {
+		return errors.New("refusing to discard an object that exists in Drive")
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM operations WHERE object_id = ?`, string(objectID)).Scan(&operations); err != nil {
+		return fmt.Errorf("check local file operations: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM content_versions WHERE object_id = ?`, string(objectID)).Scan(&contentVersions); err != nil {
+		return fmt.Errorf("check local file content: %w", err)
+	}
+	if operations != 0 || contentVersions != 0 {
+		return errors.New("refusing to discard a local file with durable content or operations")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM directory_entries WHERE object_id = ?`, string(objectID)); err != nil {
+		return fmt.Errorf("remove local file directory entry: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM objects WHERE object_id = ?`, string(objectID)); err != nil {
+		return fmt.Errorf("remove local file metadata: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit local file cleanup: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) OperationCount(ctx context.Context, objectID domain.ObjectID) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM operations WHERE object_id = ?`, string(objectID)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count object operations: %w", err)
+	}
+	return count, nil
+}
+
+func (s *Store) HasUncommittedCreate(ctx context.Context, objectID domain.ObjectID) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations
+		WHERE object_id = ? AND kind = 'create' AND state <> 'committed')`, string(objectID)).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check pending create operation: %w", err)
+	}
+	return exists != 0, nil
 }
 
 func (s *Store) ObjectByID(ctx context.Context, id domain.ObjectID) (domain.Object, error) {

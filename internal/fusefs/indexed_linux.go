@@ -27,11 +27,12 @@ const googleFolderMIMEType = "application/vnd.google-apps.folder"
 
 var ErrIndexNotReady = errors.New("Drive index is not ready")
 
-// IndexedNode exposes the persisted My Drive namespace with read-only content access.
+// IndexedNode exposes the persisted My Drive namespace and locally durable file contents.
 type IndexedNode struct {
 	fs.Inode
 	metadata *store.Store
 	reader   *contentcache.Cache
+	writer   *writeManager
 	objectID domain.ObjectID
 }
 
@@ -48,6 +49,8 @@ var (
 	_ fs.NodeReader    = (*IndexedNode)(nil)
 	_ fs.NodeReleaser  = (*IndexedNode)(nil)
 	_ fs.NodeWriter    = (*IndexedNode)(nil)
+	_ fs.NodeFsyncer   = (*IndexedNode)(nil)
+	_ fs.NodeFlusher   = (*IndexedNode)(nil)
 	_ fs.NodeSetattrer = (*IndexedNode)(nil)
 	_ fs.NodeCreater   = (*IndexedNode)(nil)
 	_ fs.NodeMkdirer   = (*IndexedNode)(nil)
@@ -64,6 +67,17 @@ func NewIndexedRoot(metadata *store.Store) (*IndexedNode, error) {
 }
 
 func NewIndexedRootWithReader(metadata *store.Store, reader *contentcache.Cache) (*IndexedNode, error) {
+	return newIndexedRoot(metadata, reader, nil)
+}
+
+func NewIndexedRootWithWriter(metadata *store.Store, reader *contentcache.Cache, content *store.ContentStore) (*IndexedNode, error) {
+	if content == nil {
+		return nil, errors.New("content store must not be nil for writable FUSE")
+	}
+	return newIndexedRoot(metadata, reader, newWriteManager(metadata, reader, content))
+}
+
+func newIndexedRoot(metadata *store.Store, reader *contentcache.Cache, writer *writeManager) (*IndexedNode, error) {
 	if metadata == nil {
 		return nil, errors.New("metadata store must not be nil")
 	}
@@ -81,7 +95,7 @@ func NewIndexedRootWithReader(metadata *store.Store, reader *contentcache.Cache)
 	if root.Deleted || root.MIMEType != googleFolderMIMEType || root.Inode != store.RootInode {
 		return nil, errors.New("metadata store has an invalid Drive namespace root")
 	}
-	return &IndexedNode{metadata: metadata, reader: reader, objectID: domain.RootObjectID}, nil
+	return &IndexedNode{metadata: metadata, reader: reader, writer: writer, objectID: domain.RootObjectID}, nil
 }
 
 func MountIndexed(metadata *store.Store, mountpoint string) (*fuse.Server, error) {
@@ -89,11 +103,27 @@ func MountIndexed(metadata *store.Store, mountpoint string) (*fuse.Server, error
 }
 
 func MountIndexedWithReader(metadata *store.Store, reader *contentcache.Cache, mountpoint string) (*fuse.Server, error) {
+	return mountIndexed(metadata, reader, nil, mountpoint)
+}
+
+func MountIndexedWithWriter(metadata *store.Store, reader *contentcache.Cache, content *store.ContentStore, mountpoint string) (*fuse.Server, error) {
+	if content == nil {
+		return nil, errors.New("content store must not be nil for writable FUSE")
+	}
+	return mountIndexed(metadata, reader, content, mountpoint)
+}
+
+func mountIndexed(metadata *store.Store, reader *contentcache.Cache, content *store.ContentStore, mountpoint string) (*fuse.Server, error) {
 	resolvedMountpoint, err := ValidateMountpoint(mountpoint)
 	if err != nil {
 		return nil, err
 	}
-	root, err := NewIndexedRootWithReader(metadata, reader)
+	var root *IndexedNode
+	if content == nil {
+		root, err = NewIndexedRootWithReader(metadata, reader)
+	} else {
+		root, err = NewIndexedRootWithWriter(metadata, reader, content)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -108,9 +138,11 @@ func MountIndexedWithReader(metadata *store.Store, reader *contentcache.Cache, m
 		MountOptions: fuse.MountOptions{
 			FsName:        "google-drive-linux",
 			Name:          "google-drive-linux",
-			Options:       []string{"ro"},
 			DisableXAttrs: true,
 		},
+	}
+	if content == nil {
+		options.MountOptions.Options = []string{"ro"}
 	}
 	server, err := fs.Mount(resolvedMountpoint, root, options)
 	if err != nil {
@@ -156,12 +188,12 @@ func (n *IndexedNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	if child.Deleted {
 		return nil, syscall.ENOENT
 	}
-	mode, errno := modeForObject(child)
+	mode, errno := n.modeForObject(child)
 	if errno != 0 {
 		return nil, errno
 	}
 	fillAttr(&out.Attr, child, mode)
-	return n.NewInode(ctx, &IndexedNode{metadata: n.metadata, reader: n.reader, objectID: child.ID}, fs.StableAttr{
+	return n.NewInode(ctx, &IndexedNode{metadata: n.metadata, reader: n.reader, writer: n.writer, objectID: child.ID}, fs.StableAttr{
 		Mode: mode & syscall.S_IFMT,
 		Ino:  uint64(child.Inode),
 	}), 0
@@ -199,23 +231,27 @@ func (n *IndexedNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 	return fs.NewListDirStream(entries), 0
 }
 
-func (n *IndexedNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+func (n *IndexedNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	object, errno := n.object(ctx)
 	if errno != 0 {
 		return errno
 	}
-	mode, errno := modeForObject(object)
+	mode, errno := n.modeForObject(object)
 	if errno != 0 {
 		return errno
+	}
+	if file, ok := handle.(*writeHandle); ok {
+		if size, err := n.writer.size(file); err == nil {
+			object.Size = size
+		} else {
+			return ioErrno(err)
+		}
 	}
 	fillAttr(&out.Attr, object, mode)
 	return 0
 }
 
 func (n *IndexedNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	if flags&uint32(os.O_WRONLY|os.O_RDWR) != 0 {
-		return nil, 0, syscall.EROFS
-	}
 	object, errno := n.object(ctx)
 	if errno != 0 {
 		return nil, 0, errno
@@ -223,8 +259,19 @@ func (n *IndexedNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 	if object.MIMEType == googleFolderMIMEType {
 		return nil, 0, syscall.EISDIR
 	}
-	if _, errno := modeForObject(object); errno != 0 {
+	if _, errno := n.modeForObject(object); errno != 0 {
 		return nil, 0, errno
+	}
+	if flags&uint32(os.O_WRONLY|os.O_RDWR) != 0 || flags&uint32(os.O_TRUNC) != 0 {
+		if n.writer == nil {
+			return nil, 0, syscall.EROFS
+		}
+		return n.writer.open(ctx, object, flags)
+	}
+	if n.writer != nil {
+		if handle, ok := n.writer.openExisting(object, flags); ok {
+			return handle, fuse.FOPEN_DIRECT_IO, 0
+		}
 	}
 	if n.reader == nil {
 		return nil, 0, syscall.EOPNOTSUPP
@@ -237,6 +284,16 @@ func (n *IndexedNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 }
 
 func (n *IndexedNode) Read(_ context.Context, handle fs.FileHandle, destination []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
+	if file, ok := handle.(*writeHandle); ok {
+		if n.writer == nil {
+			return nil, syscall.EBADF
+		}
+		read, err := n.writer.read(file, destination, offset)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, ioErrno(err)
+		}
+		return fuse.ReadResultData(destination[:read]), 0
+	}
 	file, ok := handle.(*indexedFileHandle)
 	if !ok || file.content == nil {
 		return nil, syscall.EBADF
@@ -248,7 +305,13 @@ func (n *IndexedNode) Read(_ context.Context, handle fs.FileHandle, destination 
 	return fuse.ReadResultData(destination[:read]), 0
 }
 
-func (n *IndexedNode) Release(_ context.Context, handle fs.FileHandle) syscall.Errno {
+func (n *IndexedNode) Release(ctx context.Context, handle fs.FileHandle) syscall.Errno {
+	if file, ok := handle.(*writeHandle); ok {
+		if n.writer == nil {
+			return syscall.EBADF
+		}
+		return n.writer.release(ctx, file)
+	}
 	file, ok := handle.(*indexedFileHandle)
 	if !ok || file.content == nil {
 		return syscall.EBADF
@@ -259,16 +322,39 @@ func (n *IndexedNode) Release(_ context.Context, handle fs.FileHandle) syscall.E
 	return 0
 }
 
-func (n *IndexedNode) Write(context.Context, fs.FileHandle, []byte, int64) (uint32, syscall.Errno) {
-	return 0, syscall.EROFS
+func (n *IndexedNode) Write(_ context.Context, handle fs.FileHandle, data []byte, offset int64) (uint32, syscall.Errno) {
+	if n.writer == nil {
+		return 0, syscall.EROFS
+	}
+	file, ok := handle.(*writeHandle)
+	if !ok {
+		return 0, syscall.EBADF
+	}
+	written, err := n.writer.write(file, data, offset)
+	if err != nil && written == 0 {
+		return 0, ioErrno(err)
+	}
+	return uint32(written), 0
 }
 
-func (n *IndexedNode) Setattr(context.Context, fs.FileHandle, *fuse.SetAttrIn, *fuse.AttrOut) syscall.Errno {
-	return syscall.EROFS
+func (n *IndexedNode) Setattr(ctx context.Context, handle fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if in == nil {
+		return syscall.EINVAL
+	}
+	allowed := uint32(fuse.FATTR_SIZE | fuse.FATTR_FH | fuse.FATTR_LOCKOWNER | fuse.FATTR_KILL_SUIDGID)
+	if in.Valid&^allowed != 0 {
+		return syscall.EOPNOTSUPP
+	}
+	if size, ok := in.GetSize(); ok {
+		if errno := n.truncate(ctx, handle, size); errno != 0 {
+			return errno
+		}
+	}
+	return n.Getattr(ctx, handle, out)
 }
 
-func (n *IndexedNode) Create(context.Context, string, uint32, uint32, *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	return nil, nil, 0, syscall.EROFS
+func (n *IndexedNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	return n.create(ctx, name, flags, mode, out)
 }
 
 func (n *IndexedNode) Mkdir(context.Context, string, uint32, *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -318,6 +404,20 @@ func modeForObject(object domain.Object) (uint32, syscall.Errno) {
 	}
 }
 
+func (n *IndexedNode) modeForObject(object domain.Object) (uint32, syscall.Errno) {
+	mode, errno := modeForObject(object)
+	if errno != 0 || n.writer == nil {
+		return mode, errno
+	}
+	if object.MIMEType == googleFolderMIMEType {
+		return fuse.S_IFDIR | 0o755, 0
+	}
+	if canEdit(object) {
+		return fuse.S_IFREG | 0o644, 0
+	}
+	return mode, 0
+}
+
 func fillAttr(attr *fuse.Attr, object domain.Object, mode uint32) {
 	size := object.Size
 	if size < 0 {
@@ -350,6 +450,8 @@ func setFuseTime(value time.Time, seconds *uint64, nanoseconds *uint32) {
 
 func errnoForError(err error) syscall.Errno {
 	switch {
+	case errors.Is(err, store.ErrDirectoryEntryExists):
+		return syscall.EEXIST
 	case errors.Is(err, sql.ErrNoRows):
 		return syscall.ENOENT
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -360,6 +462,9 @@ func errnoForError(err error) syscall.Errno {
 }
 
 func contentErrno(err error) syscall.Errno {
+	if err == nil {
+		return 0
+	}
 	switch {
 	case errors.Is(err, syscall.EISDIR):
 		return syscall.EISDIR
@@ -381,6 +486,8 @@ func contentErrno(err error) syscall.Errno {
 		return syscall.ENOSPC
 	case errors.Is(err, store.ErrInsufficientDiskSpace):
 		return syscall.ENOSPC
+	case errors.Is(err, store.ErrDirectoryEntryExists):
+		return syscall.EEXIST
 	default:
 		var networkError net.Error
 		if errors.As(err, &networkError) {
