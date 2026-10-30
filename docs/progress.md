@@ -173,7 +173,14 @@
 - Limitations: no real Google account, Secret Service session, `/dev/fuse` mount, or visible GNOME/KDE session is available here. The Qt controls and live authenticated upload/download path still need a desktop/account check. The sync runtime uses the existing worker's retry, resume, and conflict behavior; it does not eliminate Drive's documented update race window.
 - Git commit: `bb14f17` (`feat: add Qt controls and sync status views`).
 
+## Step 20 — AppImage packaging and launch
+
+- The packaging script now installs both Go executables, Qt 6, X11/Wayland/offscreen platform plugins, the desktop entry, icon, third-party notice, and direct dependency license texts. README documents AppImage launch and the separate FUSE requirement. Closing the window when no system tray is available now requests service shutdown so the service can unmount before the GUI exits.
+- Validation: `make appimage`, `make qt-smoke`, shell syntax and `git diff --check` passed. The image extracted with `--appimage-extract`; extracted `AppRun --smoke` passed with system Qt/plugin search paths disabled, and `drivefs --version` ran. A headless AppDir lifecycle check started `drivefs` next to `driveapp`, confirmed it stayed alive after the GUI process exited, then confirmed `app.quit` stopped the service. The no-tray smoke reported that the main window remains available. AppImage SHA-256: `f9932195bfc554ea0fc86efb9f013f37b002c844b4f0cf6375f003df99037f3d`.
+- Limitations: an ordinary AppImage launch failed because this system has no usable `fusermount`/`/dev/fuse`; extraction and extraction-and-run work, but neither provides FUSE access to the Drive mount. There is no active `org.freedesktop.secrets` owner on the session bus, no live Google account, and no visible GNOME/KDE session. The bundle includes Qt platform plugins and additional host-discovered Qt image-format plugins; the exact transitive library license inventory and any required relinking/source materials remain a release audit item. The Google `drive` OAuth scope also needs the applicable Google verification before public distribution.
+- Git commit: `e62cac6` (`build: package Go and Qt application as AppImage`).
+
 ## Next
 
-Step 20: produce and verify the x86_64 AppImage.
+Step 21: run release checks and finish operating and release documentation.
 
