@@ -71,7 +71,7 @@
 - Documented error-to-state mapping and retry behavior in `docs/drive-api-errors.md`; updated README to clarify the new adapter is not yet wired into `drivefs` or the Qt app.
 - Validation: local fake-server tests cover pagination, metadata fields, CRUD/move/trash, streamed download, changes, generated IDs, resumable start/chunk/status/completion, expired sessions, 401, distinct 403 reasons, 404, 429, 5xx, connection reset, retry cancellation, no retry for ambiguous mutations, cross-origin redirect rejection, request limits, and input validation. `go test -race ./internal/driveapi -count=1` passed. No requests were sent to Google.
 - Limitations: only fake-server behavior is verified; Google Cloud project quotas, actual token refresh over HTTP, live Drive data, and real resumable-session behavior remain unverified.
-- Git commit: pending.
+- Git commit: `11c9aca` (`feat: add Drive API adapter and fake server`).
 
 ## Next
 
