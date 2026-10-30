@@ -83,7 +83,16 @@
 - Limitations: Google root ID behavior, actual API pagination/change ordering, account-specific shared-with-me behavior, and the end-to-end OAuth-to-index integration have not been tested against a real account. The `drivefs` and Qt processes still do not invoke the indexer.
 - Git commit: `f103e26` (`feat: index My Drive with pagination and catch-up`).
 
+## Step 10 — incremental Drive changes
+
+- Added SQLite migration 3 for a remote-change shadow. Remote metadata, names, parents, capabilities, version, and removal state are retained separately when an object has an uncommitted local operation; local bytes, name, inode, and queue state remain intact. During reindex, pending objects and the ancestor folders needed to reach them remain visible, with provisional shadows until the snapshot and catch-up finish.
+- Added a resumable changes poll cycle. The in-flight page cursor is committed with each applied page, while the durable change token advances only at the final page. Stale/replayed page application is rejected. New folders found during polling are scanned recursively and changes are caught up again before the index becomes ready.
+- Classified invalid page tokens separately from generic bad requests. A rejected changes cursor triggers a controlled reindex that captures its new start token before listing the tree. API error docs and README now describe the poller and its integration boundary.
+- Validation: `make check` passed; `go test -race ./internal/store ./internal/indexer -count=1` passed; `git diff --check` passed. Fake-API tests cover multi-page polling, transaction rollback and replay rejection, reopening after a committed page, removal/lost access, move/rename/capabilities, queued writes, invalid-token reindex, nested queued files, and newly discovered folders. No Google requests were made.
+- Limitations: `Poller.Poll` drains a polling cycle but is not yet scheduled or wired into the desktop/FUSE processes; process lifecycle wiring is a later step. Real-account token behavior and live Drive changes remain unverified.
+- Git commit: `4c373ac` (`feat: apply Drive changes incrementally`).
+
 ## Next
 
-Step 10: implement ongoing changes polling with atomic page application, safe stale-token recovery, and protection for local queued edits.
+Step 11: expose the stable SQLite namespace through FUSE lookup, attributes, and directory listing.
 
