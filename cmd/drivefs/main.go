@@ -8,14 +8,18 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
+
 	"google-drive-linux/internal/fusefs"
+	"google-drive-linux/internal/store"
 )
 
 const version = "0.0.0-dev"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
-	source := flag.String("source", "", "local source directory for the FUSE spike")
+	database := flag.String("database", "", "SQLite metadata database for the indexed Drive namespace")
+	source := flag.String("source", "", "local source directory for the loopback FUSE spike")
 	mountpoint := flag.String("mountpoint", "", "existing empty directory to mount on")
 	flag.Parse()
 
@@ -24,16 +28,35 @@ func main() {
 		return
 	}
 
-	if *source == "" || *mountpoint == "" {
+	if *mountpoint == "" || (*database == "" && *source == "") || (*database != "" && *source != "") {
 		flag.Usage()
 		os.Exit(2)
 	}
 
-	server, err := fusefs.MountLoopback(*source, *mountpoint)
-	if err != nil {
-		log.Fatalf("start FUSE spike: %v", err)
+	var server *fuse.Server
+	var metadata *store.Store
+	var err error
+	if *database != "" {
+		metadata, err = store.Open(*database)
+		if err != nil {
+			log.Fatalf("open metadata database: %v", err)
+		}
+		server, err = fusefs.MountIndexed(metadata, *mountpoint)
+	} else {
+		server, err = fusefs.MountLoopback(*source, *mountpoint)
 	}
-	log.Printf("FUSE loopback mounted at %s; this is a local-only prototype", *mountpoint)
+	if err != nil {
+		if metadata != nil {
+			_ = metadata.Close()
+		}
+		log.Fatalf("start FUSE mount: %v", err)
+	}
+	if metadata != nil {
+		defer metadata.Close()
+		log.Printf("read-only indexed Drive namespace mounted at %s", *mountpoint)
+	} else {
+		log.Printf("FUSE loopback spike mounted at %s; this is a local-only prototype", *mountpoint)
+	}
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)

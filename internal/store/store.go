@@ -384,6 +384,41 @@ func (s *Store) Children(ctx context.Context, parentID domain.ObjectID) ([]domai
 	return entries, nil
 }
 
+type ChildMetadata struct {
+	Entry    domain.DirectoryEntry
+	Inode    domain.Inode
+	MIMEType string
+}
+
+// ChildrenWithMetadata returns one stable snapshot of visible child names,
+// inode numbers, and MIME types for FUSE directory enumeration.
+func (s *Store) ChildrenWithMetadata(ctx context.Context, parentID domain.ObjectID) ([]ChildMetadata, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT de.parent_object_id, de.object_id, de.remote_name, de.display_name,
+		o.inode, o.mime_type FROM directory_entries de JOIN objects o ON o.object_id = de.object_id
+		WHERE de.parent_object_id = ? AND o.is_deleted = 0 ORDER BY de.display_name`, string(parentID))
+	if err != nil {
+		return nil, fmt.Errorf("list directory child metadata: %w", err)
+	}
+	defer rows.Close()
+	var entries []ChildMetadata
+	for rows.Next() {
+		var entry ChildMetadata
+		var parentID, objectID string
+		var inode uint64
+		if err := rows.Scan(&parentID, &objectID, &entry.Entry.RemoteName, &entry.Entry.DisplayName, &inode, &entry.MIMEType); err != nil {
+			return nil, fmt.Errorf("read directory child metadata: %w", err)
+		}
+		entry.Entry.ParentID = domain.ObjectID(parentID)
+		entry.Entry.ObjectID = domain.ObjectID(objectID)
+		entry.Inode = domain.Inode(inode)
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read directory child metadata: %w", err)
+	}
+	return entries, nil
+}
+
 const objectSelect = `SELECT object_id, drive_file_id, inode, mime_type, size_bytes,
 	drive_version, modified_at, web_view_link, capabilities_json, is_deleted, created_at, updated_at
 	FROM objects`
