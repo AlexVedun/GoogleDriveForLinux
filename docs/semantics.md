@@ -38,12 +38,14 @@ This document is the contract between the FUSE layer, local store, Drive worker,
 Required order for publishing a content version:
 
 1. Reserve local disk space for the write under a serialized reservation mechanism.
-2. Write bytes to a unique staging file and call `fsync` on the file.
-3. Atomically rename it to an immutable version/blob path and `fsync` the containing directory.
-4. Commit the content-version reference and queue intent in a durable SQLite transaction.
-5. Only then acknowledge the FUSE durability operation.
+2. Commit a `prepared` operation and incomplete content-version row with stable IDs.
+3. Stream bytes to a unique staging file, compute its size and SHA-256, `fsync` the file, then `fsync` the pending directory entry.
+4. In a durable SQLite transaction, record the expected size and SHA-256 while keeping the operation `prepared`.
+5. Atomically rename the staging file to its immutable version/blob path and `fsync` the containing directory.
+6. In one durable SQLite transaction, mark the content version complete/current, update object metadata, and change the operation to `queued`.
+7. Only after that transaction succeeds acknowledge the FUSE durability operation.
 
-Recovery may remove an unreferenced staging/blob file only after proving that it is not named by a live object, open handle, pinned object, or queue operation. If recovery cannot determine whether an upload committed, query Drive using the persisted operation identity before retrying. Never solve uncertainty by deleting the local version.
+SQLite uses WAL with `synchronous=FULL`; connection settings are checked at startup. Recovery may remove a generated partial file for a prepared operation only when it has no durable checksum and the database proves that its version is incomplete, non-current, and not shared by another reference. When a checksum is present, recovery verifies the final or staging file before publishing it. Preserve files with mismatched or uncertain content for inspection; do not delete them to make the database look clean. Remove generated orphan files only after checking database references. If recovery cannot determine whether an upload committed, query Drive using the persisted operation identity before retrying. Never solve uncertainty by deleting the local version.
 
 ## Queue states and ordering
 

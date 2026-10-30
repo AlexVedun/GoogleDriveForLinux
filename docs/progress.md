@@ -38,12 +38,23 @@
 - Added typed object, Drive file, inode, content-version, operation, account, sync-state and event models under `internal/domain`.
 - Added a versioned SQLite schema for objects, parent/name mappings, immutable content-version references, queue operations and dependencies, account metadata, Drive change token, settings, pins, and error/conflict events. The schema fixes the root inode, allocates persistent non-reused inodes, allows duplicate exact Drive names with distinct persisted visible names, and enforces unique Drive IDs, inode IDs, operation IDs/idempotency keys, and parent/display-name pairs.
 - Added transactional object creation, root bootstrap, foreign-key enforcement, mode `0600` for the database, migration SHA-256 checks, and documentation for migration versioning and backups before incompatible changes.
-- Driver: `mattn/go-sqlite3` v1.14.52 is provisional for the schema spike because the selected Qt stack already requires CGO. Compare it with a CGO-free SQLite driver during step 6 before fixing crash-durability settings or treating the driver choice as final.
+- Driver: `mattn/go-sqlite3` v1.14.52 was provisional during this schema step; step 6 compares it with a CGO-free driver and records the final choice.
 - Validation: `go test ./internal/store -count=1`, `go test ./...`, `go vet ./...`, `make build`, and `git diff --check` passed. Tests cover fresh/reopened databases, root and object inode stability, duplicate remote names, unique constraints, foreign keys, atomic failed inserts, and migration checksum protection.
 - Limitations: the visible-name collision suffix generator is for the Drive index step; content-file durability, WAL/synchronous policy, and forced-termination recovery are step 6. This step does not connect to Drive or FUSE.
+- Git commit: `fec215f` (`feat: add persistent metadata and queue schema`).
+
+## Step 6 — durable content versions and recovery journal
+
+- Added private, separate directories for evictable cache, pinned data, and pending immutable versions. Pending writes stream through a 128 KiB buffer into a private staging file, sync the bytes and directory entry, record size/checksum in SQLite, atomically rename, sync the directory, then commit the complete/current version and queued operation.
+- SQLite now uses WAL, `synchronous=FULL`, foreign keys, a 5-second busy timeout, and a 1000-page WAL auto-checkpoint. A connection hook configures the checkpoint threshold; startup verifies all four pooled connections before using the database.
+- Startup recovery verifies prepared content by size and SHA-256, publishes valid staged versions, and commits them to the queue. It removes only incomplete generated files with no completed/current or other-version references, preserves checksum-mismatched files for inspection, and removes generated orphans only when no metadata row references them. Repeated recovery is idempotent.
+- Writes to the same object are serialized. Each write declares its expected size; a serialized reservation checks `statfs` and rejects a write that would leave less than 10% of the filesystem available. In-flight reservations shrink as bytes are written, so concurrent writers cannot reserve the same free space. A size mismatch or read error cleans up unacknowledged partial writes while retaining the previous acknowledged version; idempotency retries return the recorded version.
+- Driver experiment: the complete store suite passed with `mattn/go-sqlite3` v1.14.52 and with CGO-free `modernc.org/sqlite` v1.61.0 under `CGO_ENABLED=0`. Both passed SIGKILL/reopen at all six durability boundaries. The mattn store-test executable was 9.4 MB; modernc was 12.0 MB. Since MIQT already requires CGO and mattn is smaller, D-009 selects mattn. Decision O-005 is resolved.
+- Validation: `go test ./internal/store -count=1`, `go test -race ./internal/store -count=1`, the same store suite with CGO-free modernc, `make check` (`go test ./...`, `go vet ./...`, both builds), and `git diff --check` passed. Tests cover zero-byte and streamed 32 MiB content, concurrent writers and reservations, insufficient-space and size-mismatch refusal, failed reads, idempotency, safe orphan cleanup, preserved old versions, recovery idempotence, and actual SIGKILL at each boundary.
+- Limitations: SIGKILL tests validate process termination and restart on the current Fedora 44 filesystem; they do not simulate power failure or storage-controller behavior. Real FUSE mounts remain unavailable in this environment, and this step does not upload to Google Drive.
 - Git commit: pending.
 
 ## Next
 
-Step 6: implement durable content versions and the recovery journal, then run forced-termination tests.
+Step 7: implement desktop OAuth and secure token storage without persisting credentials in SQLite.
 

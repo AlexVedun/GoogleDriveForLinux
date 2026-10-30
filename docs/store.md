@@ -2,9 +2,11 @@
 
 ## Driver and file
 
-The schema prototype uses `database/sql` with `github.com/mattn/go-sqlite3` v1.14.52. Qt already requires CGO and a C++ toolchain, so the bundled SQLite amalgamation does not add another build requirement or a system SQLite runtime dependency. Step 6 will compare it with a CGO-free driver under forced-termination tests before finalizing this choice. The database file is created with mode `0600`; a newly created parent directory uses mode `0700`. OAuth tokens are not stored in SQLite.
+The store uses `database/sql` with `github.com/mattn/go-sqlite3` v1.14.52 and bundled SQLite 3.53.4. Qt already requires CGO and a C++ toolchain, so the bundled SQLite amalgamation adds no build requirement or system SQLite runtime dependency. The complete store suite, including forced-termination recovery, also passed with CGO-free `modernc.org/sqlite` v1.61.0 under `CGO_ENABLED=0`; the project selected mattn because it is smaller in the tested store binary while CGO is already required for Qt. The database file is created with mode `0600`; a newly created parent directory uses mode `0700`. OAuth tokens are not stored in SQLite.
 
-The driver currently enables foreign-key checks on every connection and sets a 5 second busy timeout. WAL mode and the final synchronous/checkpoint policy are deliberately deferred to step 6, where they must be tested with forced termination and recovery.
+Each connection enables foreign-key checks, a 5 second busy timeout, WAL mode, `synchronous=FULL`, and a 1000-page WAL auto-checkpoint. Startup opens all four pooled connections and verifies these settings before applying migrations or accepting writes. SQLite documents that WAL with `synchronous=FULL` syncs the WAL on each commit; the application tests process termination and restart but does not claim to simulate power loss or storage-controller failures.
+
+Every pending write supplies its expected snapshot size. Before creating a prepared row, the content store reserves that many available bytes under a shared in-process lock and requires at least 10% of the filesystem to remain available. The reservation is released as file bytes are accepted or when the write finishes; actual `write`, `fsync`, rename, and SQLite errors still propagate and leave the previous acknowledged version intact.
 
 ## Identity and visible names
 

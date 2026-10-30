@@ -10,9 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 
 	"google-drive-linux/internal/domain"
 )
@@ -21,9 +22,12 @@ import (
 var migrationFiles embed.FS
 
 const (
-	RootInode    domain.Inode = 1
-	rootMIMEType              = "application/vnd.google-apps.folder"
+	RootInode        domain.Inode = 1
+	rootMIMEType                  = "application/vnd.google-apps.folder"
+	sqliteDriverName              = "google-drive-sqlite3"
 )
+
+var sqliteDriverRegistration sync.Once
 
 var (
 	ErrNewerSchema      = errors.New("database schema is newer than this application")
@@ -58,7 +62,13 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("close database file: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", dataSourceName(absolutePath))
+	sqliteDriverRegistration.Do(func() {
+		sql.Register(sqliteDriverName, &sqlite3.SQLiteDriver{ConnectHook: func(connection *sqlite3.SQLiteConn) error {
+			_, err := connection.Exec(`PRAGMA wal_autocheckpoint = 1000`, nil)
+			return err
+		}})
+	})
+	db, err := sql.Open(sqliteDriverName, dataSourceName(absolutePath))
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
 	}
@@ -69,6 +79,10 @@ func Open(path string) (*Store, error) {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("connect to SQLite database: %w", err)
+	}
+	if err := verifySQLiteDurability(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	store := &Store{db: db, path: absolutePath}
 	if err := store.migrate(ctx); err != nil {
@@ -87,8 +101,56 @@ func dataSourceName(path string) string {
 	query := url.Values{}
 	query.Set("_busy_timeout", "5000")
 	query.Set("_foreign_keys", "on")
+	query.Set("_journal_mode", "WAL")
+	query.Set("_synchronous", "FULL")
 	uri.RawQuery = query.Encode()
 	return uri.String()
+}
+
+func verifySQLiteDurability(ctx context.Context, db *sql.DB) error {
+	connections := make([]*sql.Conn, 0, 4)
+	defer func() {
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	}()
+	for i := 0; i < cap(connections); i++ {
+		connection, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("open SQLite connection for durability check: %w", err)
+		}
+		connections = append(connections, connection)
+	}
+	for index, connection := range connections {
+		if _, err := connection.ExecContext(ctx, `PRAGMA wal_autocheckpoint = 1000`); err != nil {
+			return fmt.Errorf("set SQLite checkpoint threshold on connection %d: %w", index+1, err)
+		}
+		var journalMode string
+		var synchronous int
+		var foreignKeys int
+		var busyTimeout int
+		var checkpointPages int
+		if err := connection.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+			return fmt.Errorf("read SQLite journal mode on connection %d: %w", index+1, err)
+		}
+		if err := connection.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronous); err != nil {
+			return fmt.Errorf("read SQLite synchronous mode on connection %d: %w", index+1, err)
+		}
+		if err := connection.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+			return fmt.Errorf("read SQLite foreign-key mode on connection %d: %w", index+1, err)
+		}
+		if err := connection.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+			return fmt.Errorf("read SQLite busy timeout on connection %d: %w", index+1, err)
+		}
+		if err := connection.QueryRowContext(ctx, `PRAGMA wal_autocheckpoint`).Scan(&checkpointPages); err != nil {
+			return fmt.Errorf("read SQLite checkpoint setting on connection %d: %w", index+1, err)
+		}
+		if !strings.EqualFold(journalMode, "wal") || synchronous != 2 || foreignKeys != 1 || busyTimeout != 5000 || checkpointPages != 1000 {
+			return fmt.Errorf("SQLite connection %d has unsafe settings: journal=%q synchronous=%d foreign_keys=%d busy_timeout=%d wal_autocheckpoint=%d",
+				index+1, journalMode, synchronous, foreignKeys, busyTimeout, checkpointPages)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
