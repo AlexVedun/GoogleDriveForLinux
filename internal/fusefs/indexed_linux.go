@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"strings"
 	"syscall"
@@ -15,7 +17,9 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"google-drive-linux/internal/contentcache"
 	"google-drive-linux/internal/domain"
+	"google-drive-linux/internal/driveapi"
 	"google-drive-linux/internal/store"
 )
 
@@ -23,12 +27,16 @@ const googleFolderMIMEType = "application/vnd.google-apps.folder"
 
 var ErrIndexNotReady = errors.New("Drive index is not ready")
 
-// IndexedNode exposes the persisted My Drive namespace. This step intentionally
-// provides metadata-only, read-only access; content reads are added separately.
+// IndexedNode exposes the persisted My Drive namespace with read-only content access.
 type IndexedNode struct {
 	fs.Inode
 	metadata *store.Store
+	reader   *contentcache.Cache
 	objectID domain.ObjectID
+}
+
+type indexedFileHandle struct {
+	content *contentcache.Handle
 }
 
 var (
@@ -37,6 +45,8 @@ var (
 	_ fs.NodeReaddirer = (*IndexedNode)(nil)
 	_ fs.NodeGetattrer = (*IndexedNode)(nil)
 	_ fs.NodeOpener    = (*IndexedNode)(nil)
+	_ fs.NodeReader    = (*IndexedNode)(nil)
+	_ fs.NodeReleaser  = (*IndexedNode)(nil)
 	_ fs.NodeWriter    = (*IndexedNode)(nil)
 	_ fs.NodeSetattrer = (*IndexedNode)(nil)
 	_ fs.NodeCreater   = (*IndexedNode)(nil)
@@ -50,6 +60,10 @@ var (
 )
 
 func NewIndexedRoot(metadata *store.Store) (*IndexedNode, error) {
+	return NewIndexedRootWithReader(metadata, nil)
+}
+
+func NewIndexedRootWithReader(metadata *store.Store, reader *contentcache.Cache) (*IndexedNode, error) {
 	if metadata == nil {
 		return nil, errors.New("metadata store must not be nil")
 	}
@@ -67,15 +81,19 @@ func NewIndexedRoot(metadata *store.Store) (*IndexedNode, error) {
 	if root.Deleted || root.MIMEType != googleFolderMIMEType || root.Inode != store.RootInode {
 		return nil, errors.New("metadata store has an invalid Drive namespace root")
 	}
-	return &IndexedNode{metadata: metadata, objectID: domain.RootObjectID}, nil
+	return &IndexedNode{metadata: metadata, reader: reader, objectID: domain.RootObjectID}, nil
 }
 
 func MountIndexed(metadata *store.Store, mountpoint string) (*fuse.Server, error) {
+	return MountIndexedWithReader(metadata, nil, mountpoint)
+}
+
+func MountIndexedWithReader(metadata *store.Store, reader *contentcache.Cache, mountpoint string) (*fuse.Server, error) {
 	resolvedMountpoint, err := ValidateMountpoint(mountpoint)
 	if err != nil {
 		return nil, err
 	}
-	root, err := NewIndexedRoot(metadata)
+	root, err := NewIndexedRootWithReader(metadata, reader)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +161,7 @@ func (n *IndexedNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 		return nil, errno
 	}
 	fillAttr(&out.Attr, child, mode)
-	return n.NewInode(ctx, &IndexedNode{metadata: n.metadata, objectID: child.ID}, fs.StableAttr{
+	return n.NewInode(ctx, &IndexedNode{metadata: n.metadata, reader: n.reader, objectID: child.ID}, fs.StableAttr{
 		Mode: mode & syscall.S_IFMT,
 		Ino:  uint64(child.Inode),
 	}), 0
@@ -194,7 +212,10 @@ func (n *IndexedNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.At
 	return 0
 }
 
-func (n *IndexedNode) Open(ctx context.Context, _ uint32) (fs.FileHandle, uint32, syscall.Errno) {
+func (n *IndexedNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if flags&uint32(os.O_WRONLY|os.O_RDWR) != 0 {
+		return nil, 0, syscall.EROFS
+	}
 	object, errno := n.object(ctx)
 	if errno != 0 {
 		return nil, 0, errno
@@ -205,7 +226,37 @@ func (n *IndexedNode) Open(ctx context.Context, _ uint32) (fs.FileHandle, uint32
 	if _, errno := modeForObject(object); errno != 0 {
 		return nil, 0, errno
 	}
-	return nil, 0, syscall.EOPNOTSUPP
+	if n.reader == nil {
+		return nil, 0, syscall.EOPNOTSUPP
+	}
+	content, err := n.reader.Open(ctx, object)
+	if err != nil {
+		return nil, 0, contentErrno(err)
+	}
+	return &indexedFileHandle{content: content}, fuse.FOPEN_DIRECT_IO, 0
+}
+
+func (n *IndexedNode) Read(_ context.Context, handle fs.FileHandle, destination []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
+	file, ok := handle.(*indexedFileHandle)
+	if !ok || file.content == nil {
+		return nil, syscall.EBADF
+	}
+	read, err := file.content.ReadAt(destination, offset)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, contentErrno(err)
+	}
+	return fuse.ReadResultData(destination[:read]), 0
+}
+
+func (n *IndexedNode) Release(_ context.Context, handle fs.FileHandle) syscall.Errno {
+	file, ok := handle.(*indexedFileHandle)
+	if !ok || file.content == nil {
+		return syscall.EBADF
+	}
+	if err := file.content.Close(); err != nil {
+		return syscall.EIO
+	}
+	return 0
 }
 
 func (n *IndexedNode) Write(context.Context, fs.FileHandle, []byte, int64) (uint32, syscall.Errno) {
@@ -304,6 +355,37 @@ func errnoForError(err error) syscall.Errno {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return syscall.EINTR
 	default:
+		return syscall.EIO
+	}
+}
+
+func contentErrno(err error) syscall.Errno {
+	switch {
+	case errors.Is(err, syscall.EISDIR):
+		return syscall.EISDIR
+	case errors.Is(err, driveapi.ErrUnauthenticated), errors.Is(err, driveapi.ErrForbidden), errors.Is(err, contentcache.ErrNotDownloadable):
+		return syscall.EACCES
+	case errors.Is(err, driveapi.ErrNotFound), errors.Is(err, os.ErrNotExist):
+		return syscall.ENOENT
+	case errors.Is(err, driveapi.ErrRateLimited):
+		return syscall.EAGAIN
+	case errors.Is(err, driveapi.ErrTemporary):
+		return syscall.EHOSTUNREACH
+	case errors.Is(err, contentcache.ErrUnsupportedType):
+		return syscall.EOPNOTSUPP
+	case errors.Is(err, contentcache.ErrStaleRemoteVersion):
+		return syscall.EAGAIN
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return syscall.EINTR
+	case errors.Is(err, syscall.ENOSPC):
+		return syscall.ENOSPC
+	case errors.Is(err, store.ErrInsufficientDiskSpace):
+		return syscall.ENOSPC
+	default:
+		var networkError net.Error
+		if errors.As(err, &networkError) {
+			return syscall.EHOSTUNREACH
+		}
 		return syscall.EIO
 	}
 }

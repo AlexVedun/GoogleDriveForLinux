@@ -3,9 +3,13 @@
 package fusefs
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,7 +20,9 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"google-drive-linux/internal/contentcache"
 	"google-drive-linux/internal/domain"
+	"google-drive-linux/internal/driveapi"
 	"google-drive-linux/internal/store"
 )
 
@@ -192,6 +198,102 @@ func TestIndexedReaddirCanRunConcurrentlyWithIndexUpdates(t *testing.T) {
 	}
 }
 
+func TestIndexedFileReadsContentAtOffsetsAndReleasesHandle(t *testing.T) {
+	ctx := context.Background()
+	metadata := openIndexedTestStore(t, 1)
+	defer metadata.Close()
+	payload := []byte("remote bytes")
+	entry := indexedTestEntry("file-0000", "file-0000.txt", "root-drive", "text/plain", int64(len(payload)))
+	entry.Object.DriveVersion = "version-read-1"
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitChangePage(ctx, pageToken, []store.RemoteChange{{DriveFileID: "file-0000", Entry: &entry}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := store.NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksum := md5.Sum(payload)
+	remote := driveapi.File{
+		ID: "file-0000", MIMEType: "text/plain", Size: int64(len(payload)), Version: "version-read-1",
+		MD5Checksum: hex.EncodeToString(checksum[:]), Capabilities: driveapi.Capabilities{CanDownload: true},
+	}
+	drive := &indexedReadDrive{file: remote, payload: payload}
+	reader, err := contentcache.New(drive, metadata, content, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewIndexedRootWithReader(metadata, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fs.NewNodeFS(root, &fs.Options{RootStableAttr: &fs.StableAttr{Ino: uint64(store.RootInode)}})
+	inode, errno := root.Lookup(ctx, "file-0000.txt", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	node := inode.Operations().(*IndexedNode)
+	handle, flags, errno := node.Open(ctx, 0)
+	if errno != 0 || flags&fuse.FOPEN_DIRECT_IO == 0 {
+		t.Fatalf("Open flags = %d, errno = %v; want direct I/O", flags, errno)
+	}
+	readResult, errno := node.Read(ctx, handle, make([]byte, 4), 2)
+	if errno != 0 {
+		t.Fatalf("Read errno = %v", errno)
+	}
+	readBytes, status := readResult.Bytes(make([]byte, 4))
+	if status != fuse.OK || string(readBytes) != "mote" {
+		t.Fatalf("Read bytes = %q, status = %v; want %q", readBytes, status, "mote")
+	}
+	newPayload := []byte("replacement")
+	updatedEntry := indexedTestEntry("file-0000", "file-0000.txt", "root-drive", "text/plain", int64(len(newPayload)))
+	updatedEntry.Object.DriveVersion = "version-read-2"
+	pageToken, err = metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitChangePage(ctx, pageToken, []store.RemoteChange{{DriveFileID: "file-0000", Entry: &updatedEntry}}, "", "live-3"); err != nil {
+		t.Fatal(err)
+	}
+	drive.file = driveapi.File{
+		ID: "file-0000", MIMEType: "text/plain", Size: int64(len(newPayload)), Version: "version-read-2",
+		MD5Checksum: checksumString(newPayload), Capabilities: driveapi.Capabilities{CanDownload: true},
+	}
+	drive.payload = newPayload
+	newHandle, _, errno := node.Open(ctx, 0)
+	if errno != 0 {
+		t.Fatalf("Open updated remote version errno = %v", errno)
+	}
+	oldBytes, errno := node.Read(ctx, handle, make([]byte, 12), 0)
+	if errno != 0 {
+		t.Fatalf("Read old open descriptor after remote update errno = %v", errno)
+	}
+	oldContents, _ := oldBytes.Bytes(make([]byte, 12))
+	if string(oldContents) != string(payload) {
+		t.Fatalf("open descriptor changed to new version: got %q, want %q", oldContents, payload)
+	}
+	newBytes, errno := node.Read(ctx, newHandle, make([]byte, len(newPayload)), 0)
+	if errno != 0 {
+		t.Fatalf("Read new open descriptor errno = %v", errno)
+	}
+	newContents, _ := newBytes.Bytes(make([]byte, len(newPayload)))
+	if string(newContents) != string(newPayload) {
+		t.Fatalf("new descriptor bytes = %q, want %q", newContents, newPayload)
+	}
+	if errno := node.Release(ctx, newHandle); errno != 0 {
+		t.Fatalf("Release new handle errno = %v", errno)
+	}
+	if errno := node.Release(ctx, handle); errno != 0 {
+		t.Fatalf("Release errno = %v", errno)
+	}
+	if _, _, errno := node.Open(ctx, uint32(os.O_WRONLY)); errno != syscall.EROFS {
+		t.Fatalf("write-only Open errno = %v, want EROFS", errno)
+	}
+}
+
 func TestValidateMountpointRequiresEmptyExistingDirectory(t *testing.T) {
 	base := t.TempDir()
 	mountpoint := filepath.Join(base, "mount")
@@ -245,6 +347,37 @@ func openIndexedTestStore(t *testing.T, count int) *store.Store {
 		t.Fatal(err)
 	}
 	return metadata
+}
+
+type indexedReadDrive struct {
+	driveapi.API
+	file    driveapi.File
+	payload []byte
+}
+
+func (d *indexedReadDrive) GetFile(ctx context.Context, fileID string) (driveapi.File, error) {
+	if err := ctx.Err(); err != nil {
+		return driveapi.File{}, err
+	}
+	if fileID != d.file.ID {
+		return driveapi.File{}, fmt.Errorf("unexpected file ID %q", fileID)
+	}
+	return d.file, nil
+}
+
+func (d *indexedReadDrive) DownloadFile(ctx context.Context, fileID string) (driveapi.Download, error) {
+	if err := ctx.Err(); err != nil {
+		return driveapi.Download{}, err
+	}
+	if fileID != d.file.ID {
+		return driveapi.Download{}, fmt.Errorf("unexpected file ID %q", fileID)
+	}
+	return driveapi.Download{Body: io.NopCloser(bytes.NewReader(d.payload)), ContentLength: int64(len(d.payload))}, nil
+}
+
+func checksumString(data []byte) string {
+	checksum := md5.Sum(data)
+	return hex.EncodeToString(checksum[:])
 }
 
 func indexedTestEntry(id, name, parent, mimeType string, size int64) store.RemoteEntry {

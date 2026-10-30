@@ -21,8 +21,8 @@ func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	version, err := store.SchemaVersion(ctx)
-	if err != nil || version != 3 {
-		t.Fatalf("schema version = %d, err = %v; want 3, nil", version, err)
+	if err != nil || version != 4 {
+		t.Fatalf("schema version = %d, err = %v; want 4, nil", version, err)
 	}
 	root, err := store.ObjectByID(ctx, domain.RootObjectID)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestExistingVersionOneDatabaseUpgradesToVersionThree(t *testing.T) {
 	}
 	defer upgraded.Close()
 	version, err := upgraded.SchemaVersion(ctx)
-	if err != nil || version != 3 {
+	if err != nil || version != 4 {
 		t.Fatalf("upgraded schema version = %d, err = %v", version, err)
 	}
 	root, err := upgraded.ObjectByID(ctx, domain.RootObjectID)

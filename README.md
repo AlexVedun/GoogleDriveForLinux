@@ -2,7 +2,7 @@
 
 Go and Qt 6 desktop client that mounts a user's Google Drive **My Drive** folder through FUSE.
 
-The product is at the prototype stage. The repository has a local-only FUSE loopback spike and a read-only, metadata-only FUSE namespace backed by a ready SQLite index, plus a Qt 6 Widgets window/tray spike and OAuth, Drive API, initial-indexing, and incremental-polling packages. Login, index creation, the mount process, content reads, and scheduled synchronization are not yet wired into one application flow. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
+The product is at the prototype stage. The repository has a local-only FUSE loopback spike and a read-only FUSE namespace backed by a ready SQLite index, plus a Qt 6 Widgets window/tray spike and OAuth, Drive API, indexing, polling, and bounded content-cache packages. Login, index creation, the mount process, and scheduled synchronization are not yet wired into one application flow. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
 
 The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md); unresolved technical choices are tracked in [docs/decisions.md](docs/decisions.md).
 
@@ -23,7 +23,7 @@ Building requires Go, a C++ compiler, `pkg-config`, Qt 6 Widgets development fil
 
 `make appimage` downloads pinned linuxdeploy tools into the ignored `.tools/` directory, verifies their SHA-256 digests, and produces `dist/Google_Drive_for_Linux-x86_64.AppImage`. The packaging tools are fetched from the official [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy), [Qt plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-qt), and [AppImage plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-appimage) releases. The Drive API adapter is not yet connected to the indexed `drivefs` mount or Qt app.
 
-The `drivefs` command still supports a **local FUSE loopback spike** for protocol testing: `./bin/drivefs --source SOURCE_DIR --mountpoint MOUNT_DIR` uses an existing empty mount directory and a separate disposable source directory. For an already populated, ready SQLite index, `./bin/drivefs --database PATH --mountpoint MOUNT_DIR` mounts the metadata namespace read-only. Content reads, Google login, and index creation are not connected to this command yet. Run `./scripts/fuse-smoke.sh` for the destructive-operation loopback test; it creates and removes files only in its own temporary directory.
+The `drivefs` command still supports a **local FUSE loopback spike** for protocol testing: `./bin/drivefs --source SOURCE_DIR --mountpoint MOUNT_DIR` uses an existing empty mount directory and a separate disposable source directory. For an already populated, ready SQLite index, `./bin/drivefs --database PATH --mountpoint MOUNT_DIR` mounts the metadata namespace read-only. Version-checked Drive content reads are implemented in the internal FUSE and cache packages, but Google login, index creation, and their wiring into this command are still pending. Run `./scripts/fuse-smoke.sh` for the destructive-operation loopback test; it creates and removes files only in its own temporary directory.
 
 ## Data safety contract
 

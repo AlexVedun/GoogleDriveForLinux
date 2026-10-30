@@ -25,6 +25,9 @@ var (
 	ErrIdempotencyMismatch   = errors.New("idempotency key was already used for a different operation")
 	ErrIncompleteOperation   = errors.New("pending operation could not be recovered")
 	ErrInsufficientDiskSpace = errors.New("insufficient free disk space for durable content")
+	ErrCachedObjectChanged   = errors.New("Drive object changed while caching content")
+	ErrCachedObjectDirty     = errors.New("Drive object has uncommitted local changes")
+	ErrContentNotEvictable   = errors.New("cached content is pinned, dirty, or otherwise protected")
 	contentIDPattern         = regexp.MustCompile(`^cv-[0-9a-f]{32}$`)
 )
 
@@ -48,6 +51,7 @@ type ContentPaths struct {
 	Root           string
 	EvictableCache string
 	Pinned         string
+	Transient      string
 	Pending        string
 }
 
@@ -99,14 +103,15 @@ func NewContentStore(metadata *Store, root string) (*ContentStore, error) {
 		Root:           absoluteRoot,
 		EvictableCache: filepath.Join(cacheRoot, "evictable"),
 		Pinned:         filepath.Join(cacheRoot, "pinned"),
+		Transient:      filepath.Join(cacheRoot, "transient"),
 		Pending:        filepath.Join(absoluteRoot, "pending"),
 	}
-	for _, directory := range []string{paths.Root, cacheRoot, paths.EvictableCache, paths.Pinned, paths.Pending} {
+	for _, directory := range []string{paths.Root, cacheRoot, paths.EvictableCache, paths.Pinned, paths.Transient, paths.Pending} {
 		if err := ensurePrivateDirectory(directory); err != nil {
 			return nil, err
 		}
 	}
-	for _, directory := range []string{paths.Root, cacheRoot, paths.Pending} {
+	for _, directory := range []string{paths.Root, cacheRoot, paths.EvictableCache, paths.Transient, paths.Pending} {
 		if err := syncDirectory(directory); err != nil {
 			return nil, fmt.Errorf("sync content directory %q: %w", directory, err)
 		}
@@ -250,13 +255,13 @@ func (s *ContentStore) WritePending(ctx context.Context, request WriteRequest, s
 }
 
 func (s *ContentStore) CurrentContentVersion(ctx context.Context, objectID domain.ObjectID) (domain.ContentVersion, error) {
-	return s.scanContentVersion(s.metadata.db.QueryRowContext(ctx, `SELECT version_id, object_id, kind, local_path,
+	return scanContentVersion(s.metadata.db.QueryRowContext(ctx, `SELECT version_id, object_id, kind, local_path,
 		size_bytes, COALESCE(sha256, ''), COALESCE(drive_version, ''), is_complete, is_current, created_at
 		FROM content_versions WHERE object_id = ? AND is_current = 1`, string(objectID)))
 }
 
 func (s *ContentStore) OpenContentVersion(ctx context.Context, versionID domain.ContentVersionID) (*os.File, domain.ContentVersion, error) {
-	version, err := s.scanContentVersion(s.metadata.db.QueryRowContext(ctx, `SELECT version_id, object_id, kind, local_path,
+	version, err := scanContentVersion(s.metadata.db.QueryRowContext(ctx, `SELECT version_id, object_id, kind, local_path,
 		size_bytes, COALESCE(sha256, ''), COALESCE(drive_version, ''), is_complete, is_current, created_at
 		FROM content_versions WHERE version_id = ?`, string(versionID)))
 	if err != nil {
@@ -619,34 +624,48 @@ func (s *ContentStore) removeOrphanFiles(ctx context.Context) (int, error) {
 	if err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("close content references: %w", err)
 	}
-	entries, err := os.ReadDir(s.paths.Pending)
-	if err != nil {
-		return 0, fmt.Errorf("list pending content files: %w", err)
-	}
 	removedCount := 0
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return removedCount, err
-		}
-		name := entry.Name()
-		if !generatedContentFileName(name) {
-			continue
-		}
-		relative := filepath.ToSlash(filepath.Join("pending", name))
-		if _, exists := referenced[relative]; exists {
-			continue
-		}
-		removed, err := removeRegularFile(filepath.Join(s.paths.Pending, name))
+	for _, directory := range []struct {
+		path     string
+		relative string
+		filter   func(string) bool
+		keepRef  bool
+	}{
+		{path: s.paths.Pending, relative: "pending", filter: generatedContentFileName, keepRef: true},
+		{path: s.paths.EvictableCache, relative: filepath.ToSlash(filepath.Join("cache", "evictable")), filter: generatedContentFileName, keepRef: true},
+		{path: s.paths.Transient, filter: generatedDownloadFileName},
+	} {
+		entries, err := os.ReadDir(directory.path)
 		if err != nil {
-			return removedCount, err
+			return removedCount, fmt.Errorf("list content files in %q: %w", directory.path, err)
 		}
-		if removed {
-			removedCount++
+		removedHere := false
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return removedCount, err
+			}
+			if !directory.filter(entry.Name()) {
+				continue
+			}
+			if directory.keepRef {
+				relative := filepath.ToSlash(filepath.Join(directory.relative, entry.Name()))
+				if _, exists := referenced[relative]; exists {
+					continue
+				}
+			}
+			removed, err := removeRegularFile(filepath.Join(directory.path, entry.Name()))
+			if err != nil {
+				return removedCount, err
+			}
+			if removed {
+				removedCount++
+				removedHere = true
+			}
 		}
-	}
-	if removedCount > 0 {
-		if err := syncDirectory(s.paths.Pending); err != nil {
-			return removedCount, fmt.Errorf("sync orphan cleanup: %w", err)
+		if removedHere {
+			if err := syncDirectory(directory.path); err != nil {
+				return removedCount, fmt.Errorf("sync orphan cleanup in %q: %w", directory.path, err)
+			}
 		}
 	}
 	return removedCount, nil
@@ -660,7 +679,7 @@ func (s *ContentStore) writeResult(ctx context.Context, operationID domain.Opera
 	if err != nil {
 		return WriteResult{}, err
 	}
-	version, err := s.scanContentVersion(s.metadata.db.QueryRowContext(ctx, `SELECT version_id, object_id, kind, local_path,
+	version, err := scanContentVersion(s.metadata.db.QueryRowContext(ctx, `SELECT version_id, object_id, kind, local_path,
 		size_bytes, COALESCE(sha256, ''), COALESCE(drive_version, ''), is_complete, is_current, created_at
 		FROM content_versions WHERE version_id = ?`, string(versionID)))
 	if err != nil {
@@ -706,7 +725,7 @@ func (s *ContentStore) scanOperation(row rowScanner) (domain.Operation, error) {
 	return operation, nil
 }
 
-func (s *ContentStore) scanContentVersion(row rowScanner) (domain.ContentVersion, error) {
+func scanContentVersion(row rowScanner) (domain.ContentVersion, error) {
 	var version domain.ContentVersion
 	var versionID, objectID, kind, path, createdAt string
 	var complete, current int
@@ -728,7 +747,14 @@ func (s *ContentStore) scanContentVersion(row rowScanner) (domain.ContentVersion
 }
 
 func (s *ContentStore) pathForVersion(version domain.ContentVersion) (string, error) {
-	if !contentIDPattern.MatchString(string(version.ID)) || version.LocalPath != s.relativeBlobPath(version.ID) {
+	if !contentIDPattern.MatchString(string(version.ID)) {
+		return "", errors.New("content version has an invalid local path")
+	}
+	expected := s.relativeBlobPath(version.ID)
+	if version.Kind == domain.ContentCached {
+		expected = s.relativeCachedBlobPath(version.ID)
+	}
+	if version.LocalPath != expected {
 		return "", errors.New("content version has an invalid local path")
 	}
 	return filepath.Join(s.paths.Root, filepath.FromSlash(version.LocalPath)), nil
@@ -744,6 +770,14 @@ func (s *ContentStore) stagingPath(versionID domain.ContentVersionID) string {
 
 func (s *ContentStore) blobPath(versionID domain.ContentVersionID) string {
 	return filepath.Join(s.paths.Pending, string(versionID)+".blob")
+}
+
+func (s *ContentStore) relativeCachedBlobPath(versionID domain.ContentVersionID) string {
+	return filepath.ToSlash(filepath.Join("cache", "evictable", string(versionID)+".blob"))
+}
+
+func (s *ContentStore) cachedBlobPath(versionID domain.ContentVersionID) string {
+	return filepath.Join(s.paths.EvictableCache, string(versionID)+".blob")
 }
 
 func (s *ContentStore) objectLock(objectID domain.ObjectID) *sync.Mutex {
@@ -967,6 +1001,13 @@ func generatedContentFileName(name string) bool {
 		return false
 	}
 	return contentIDPattern.MatchString(name)
+}
+
+func generatedDownloadFileName(name string) bool {
+	if !strings.HasPrefix(name, ".download-") || !strings.HasSuffix(name, ".tmp") {
+		return false
+	}
+	return contentIDPattern.MatchString("cv-" + strings.TrimSuffix(strings.TrimPrefix(name, ".download-"), ".tmp"))
 }
 
 func validSHA256(value string) bool {

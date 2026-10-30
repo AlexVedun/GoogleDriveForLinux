@@ -72,6 +72,8 @@ For creates, use a pre-generated Drive ID when supported and persist it before s
 
 - The 1 GiB default limit applies only to complete, clean, unpinned, unused cache content.
 - Pinned data and queue-referenced data are never evicted to satisfy the cache limit.
+- `contentcache.New` accepts an explicit byte limit; zero selects the 1 GiB default. A download that is larger than the limit, or cannot fit without evicting protected/in-use entries, is kept in a private temporary file only for its current open handle and removed on release.
+- A cache miss checks the indexed Drive version before and after streaming the download, validates exact size and Drive MD5 when present, and records a local SHA-256 before publishing the version. A failed/interrupted download is never registered as complete. Cached data is rechecked by size and SHA-256 before each open.
 - Before a new offline write, reserve expected bytes and reject if the post-write free space would fall below 10%. Reservations prevent concurrent writers from both spending the same free space.
 - Handle a real filesystem `ENOSPC` during write/rename/fsync even if the estimate passed. Keep the preceding acknowledged version intact and report an explicit error.
 - If pins or queued changes exceed the ordinary cache limit, allow the disk use and show the overage.
