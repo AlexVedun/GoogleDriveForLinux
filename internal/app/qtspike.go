@@ -302,6 +302,11 @@ func RunQtApp(smoke bool, socketPath string) int {
 			window.Hide()
 			return
 		}
+		if !trayAvailable && !smoke {
+			event.SetAccepted(false)
+			requestQuit()
+			return
+		}
 		super(event)
 	})
 

@@ -9,7 +9,10 @@ tools_dir="$root_dir/.tools"
 app_dir="$root_dir/AppDir"
 dist_dir="$root_dir/dist"
 rm -rf "$app_dir"
-mkdir -p "$app_dir/usr/bin" "$app_dir/usr/share/icons/hicolor/scalable/apps"
+mkdir -p \
+    "$app_dir/usr/bin" \
+    "$app_dir/usr/share/icons/hicolor/scalable/apps" \
+    "$app_dir/usr/share/doc/google-drive-linux/licenses"
 
 export GOCACHE="${GOCACHE:-/tmp/google-drive-linux-gocache}"
 export GOMODCACHE="${GOMODCACHE:-/tmp/google-drive-linux-gomodcache}"
@@ -19,6 +22,10 @@ install -m 0755 bin/drivefs "$app_dir/usr/bin/drivefs"
 install -m 0644 assets/google-drive-linux.desktop "$app_dir/google-drive-linux.desktop"
 install -m 0644 assets/google-drive-linux.svg \
     "$app_dir/usr/share/icons/hicolor/scalable/apps/google-drive-linux.svg"
+install -m 0644 THIRD_PARTY_NOTICES.md \
+    "$app_dir/usr/share/doc/google-drive-linux/THIRD_PARTY_NOTICES.md"
+install -m 0644 licenses/*.txt \
+    "$app_dir/usr/share/doc/google-drive-linux/licenses/"
 
 cat > "$app_dir/AppRun" <<'APP_RUN'
 #!/usr/bin/env sh
