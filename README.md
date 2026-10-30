@@ -2,7 +2,7 @@
 
 Go and Qt 6 desktop client that mounts a user's Google Drive **My Drive** folder through FUSE.
 
-The product is at the prototype stage. The repository has a local-only FUSE loopback spike, a Qt 6 Widgets window/tray spike, and OAuth, Drive API, and initial-indexing packages; they are not yet wired into a mounted Drive filesystem or durable sync worker. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
+The product is at the prototype stage. The repository has a local-only FUSE loopback spike, a Qt 6 Widgets window/tray spike, and OAuth, Drive API, initial indexing, and incremental changes-polling packages; they are not yet wired into a mounted Drive filesystem or scheduled sync worker. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
 
 The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md); unresolved technical choices are tracked in [docs/decisions.md](docs/decisions.md).
 

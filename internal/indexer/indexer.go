@@ -98,6 +98,32 @@ func (i *Indexer) start(ctx context.Context) error {
 	return nil
 }
 
+// Reindex rebuilds remote-derived namespace state after Drive rejects the
+// saved change token. The store keeps objects with pending local operations.
+func (i *Indexer) Reindex(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context must not be nil")
+	}
+	snapshotToken, err := i.drive.GetStartPageToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get Drive reindex snapshot token: %w", err)
+	}
+	if snapshotToken == "" {
+		return errors.New("Drive returned an empty reindex snapshot token")
+	}
+	root, err := i.drive.GetFile(ctx, "root")
+	if err != nil {
+		return fmt.Errorf("read My Drive root for reindex: %w", err)
+	}
+	if root.ID == "" || root.MIMEType != driveFolderMIMEType || root.DriveID != "" {
+		return errors.New("Drive returned an invalid My Drive root during reindex")
+	}
+	if err := i.store.BeginReindex(ctx, snapshotToken, root.ID); err != nil {
+		return err
+	}
+	return i.Run(ctx)
+}
+
 func (i *Indexer) scanNextFolderPage(ctx context.Context) error {
 	folders, err := i.store.InitialIndexFolders(ctx)
 	if err != nil {
@@ -149,17 +175,28 @@ func (i *Indexer) applyNextChangePage(ctx context.Context, status store.InitialI
 	if err != nil {
 		return fmt.Errorf("list Drive changes during initial index: %w", err)
 	}
-	changes := make([]store.RemoteChange, 0, len(page.Changes))
-	for _, change := range page.Changes {
+	changes, err := remoteChanges(page.Changes)
+	if err != nil {
+		return err
+	}
+	if err := i.store.CommitInitialChanges(ctx, changes, page.NextPageToken, page.NewStartPageToken); err != nil {
+		return err
+	}
+	return nil
+}
+
+func remoteChanges(apiChanges []driveapi.Change) ([]store.RemoteChange, error) {
+	changes := make([]store.RemoteChange, 0, len(apiChanges))
+	for _, change := range apiChanges {
 		if change.FileID == "" {
-			return errors.New("Drive change has an empty file ID")
+			return nil, errors.New("Drive change has an empty file ID")
 		}
 		if change.Removed || change.File == nil || change.File.Trashed || change.File.DriveID != "" {
 			changes = append(changes, store.RemoteChange{DriveFileID: change.FileID, Removed: true})
 			continue
 		}
 		if change.File.ID != change.FileID {
-			return errors.New("Drive change file ID does not match its metadata")
+			return nil, errors.New("Drive change file ID does not match its metadata")
 		}
 		if len(change.File.Parents) != 1 {
 			changes = append(changes, store.RemoteChange{DriveFileID: change.FileID, Removed: true})
@@ -167,14 +204,11 @@ func (i *Indexer) applyNextChangePage(ctx context.Context, status store.InitialI
 		}
 		entry, err := remoteEntry(*change.File, change.File.Parents[0])
 		if err != nil {
-			return err
+			return nil, err
 		}
 		changes = append(changes, store.RemoteChange{DriveFileID: change.FileID, Entry: &entry})
 	}
-	if err := i.store.CommitInitialChanges(ctx, changes, page.NextPageToken, page.NewStartPageToken); err != nil {
-		return err
-	}
-	return nil
+	return changes, nil
 }
 
 func remoteEntry(file driveapi.File, parentDriveFileID string) (store.RemoteEntry, error) {

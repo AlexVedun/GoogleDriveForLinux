@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,8 +21,8 @@ func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	version, err := store.SchemaVersion(ctx)
-	if err != nil || version != 2 {
-		t.Fatalf("schema version = %d, err = %v; want 2, nil", version, err)
+	if err != nil || version != 3 {
+		t.Fatalf("schema version = %d, err = %v; want 3, nil", version, err)
 	}
 	root, err := store.ObjectByID(ctx, domain.RootObjectID)
 	if err != nil {
@@ -85,7 +86,7 @@ func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 	}
 }
 
-func TestExistingVersionOneDatabaseUpgradesToVersionTwo(t *testing.T) {
+func TestExistingVersionOneDatabaseUpgradesToVersionThree(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "legacy.db")
 	legacy, err := sql.Open("sqlite3", databasePath)
@@ -128,7 +129,7 @@ func TestExistingVersionOneDatabaseUpgradesToVersionTwo(t *testing.T) {
 	}
 	defer upgraded.Close()
 	version, err := upgraded.SchemaVersion(ctx)
-	if err != nil || version != 2 {
+	if err != nil || version != 3 {
 		t.Fatalf("upgraded schema version = %d, err = %v", version, err)
 	}
 	root, err := upgraded.ObjectByID(ctx, domain.RootObjectID)
@@ -215,6 +216,232 @@ func indexedRemoteEntry(id, name, parent string) RemoteEntry {
 			MIMEType: "text/plain", CapabilitiesJSON: "{}",
 		},
 		RemoteName: name, ParentDriveFileID: parent,
+	}
+}
+
+func TestIncrementalChangePagesCommitCursorAtomicallyAndRejectReplay(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	folder := indexedRemoteEntry("folder", "destination", "root-drive")
+	folder.Object.MIMEType = rootMIMEType
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", []RemoteEntry{indexedRemoteEntry("existing", "before.txt", "root-drive"), folder}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "folder", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil || pageToken != "live-1" {
+		t.Fatalf("first poll token = %q, err = %v", pageToken, err)
+	}
+	first := indexedRemoteEntry("new", "new.txt", "root-drive")
+	moved := indexedRemoteEntry("existing", "moved.txt", "folder")
+	moved.Object.DriveVersion = "2"
+	moved.Object.CapabilitiesJSON = `{"canEdit":true}`
+	invalid := indexedRemoteEntry("invalid", "invalid.txt", "root-drive")
+	invalid.Object.DriveFileID = nil
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "new", Entry: &first}, {DriveFileID: "existing", Entry: &moved}, {DriveFileID: "invalid", Entry: &invalid}}, "page-2", ""); err == nil {
+		t.Fatal("committed invalid incremental change page")
+	}
+	if _, err := metadata.ObjectByID(ctx, first.Object.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("failed page left a partial object: %v", err)
+	}
+	status, err := metadata.InitialIndexStatus(ctx)
+	if err != nil || status.ChangeToken != "live-1" || status.CatchupPageToken != "live-1" {
+		t.Fatalf("failed page advanced cursor: %#v, err = %v", status, err)
+	}
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "new", Entry: &first}, {DriveFileID: "existing", Entry: &moved}}, "page-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "new", Entry: &first}}, "page-2", ""); err == nil {
+		t.Fatal("replayed an already committed change page")
+	}
+	status, err = metadata.InitialIndexStatus(ctx)
+	if err != nil || status.ChangeToken != "live-1" || status.CatchupPageToken != "page-2" {
+		t.Fatalf("intermediate page cursor = %#v, err = %v", status, err)
+	}
+	if err := metadata.CommitChangePage(ctx, "page-2", []RemoteChange{{DriveFileID: "new", Removed: true}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = metadata.InitialIndexStatus(ctx)
+	if err != nil || status.ChangeToken != "live-2" || status.CatchupPageToken != "" || status.State != "ready" {
+		t.Fatalf("completed poll cursor = %#v, err = %v", status, err)
+	}
+	deleted, err := metadata.ObjectByID(ctx, "drive:new")
+	if err != nil || !deleted.Deleted {
+		t.Fatalf("deleted entry = %#v, err = %v", deleted, err)
+	}
+	if _, err := metadata.DirectoryEntry(ctx, "drive:folder", "moved.txt"); err != nil {
+		t.Fatalf("moved entry missing at new parent: %v", err)
+	}
+	if _, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "before.txt"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("old moved path remains visible: %v", err)
+	}
+	updated, err := metadata.ObjectByID(ctx, "drive:existing")
+	if err != nil || updated.DriveVersion != "2" || !strings.Contains(updated.CapabilitiesJSON, "canEdit") {
+		t.Fatalf("moved remote metadata = %#v, err = %v", updated, err)
+	}
+	pageToken, err = metadata.BeginChangePoll(ctx)
+	if err != nil || pageToken != "live-2" {
+		t.Fatalf("empty poll token = %q, err = %v", pageToken, err)
+	}
+	if err := metadata.CommitChangePage(ctx, pageToken, nil, "", "live-2"); err != nil {
+		t.Fatalf("commit empty page with unchanged start token: %v", err)
+	}
+}
+
+func TestRemoteChangeShadowPreservesQueuedLocalWriteAndPath(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	entry := indexedRemoteEntry("queued", "original.txt", "root-drive")
+	entry.Object.Size = 4
+	entry.Object.DriveVersion = "1"
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", []RemoteEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const localBytes = "unsent local revision"
+	write, err := content.WritePending(ctx, WriteRequest{
+		OperationID: "op-queued-write", ObjectID: entry.Object.ID, Kind: domain.OperationWrite,
+		IdempotencyKey: "queued-write", BaseDriveVersion: "1", ExpectedSize: int64(len(localBytes)),
+	}, strings.NewReader(localBytes))
+	if err != nil || write.Operation.State != domain.OperationQueued {
+		t.Fatalf("queued local write = %#v, err = %v", write, err)
+	}
+	before, err := metadata.ObjectByID(ctx, entry.Object.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := indexedRemoteEntry("queued", "renamed remotely.txt", "root-drive")
+	changed.Object.Size = 800
+	changed.Object.DriveVersion = "2"
+	changed.Object.CapabilitiesJSON = `{"canEdit":true}`
+	changed.Object.WebViewLink = "https://drive.google.com/file/d/queued"
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "queued", Entry: &changed}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := metadata.ObjectByID(ctx, entry.Object.ID)
+	if err != nil || after.Size != before.Size || after.DriveVersion != before.DriveVersion || after.Deleted {
+		t.Fatalf("remote update overwrote queued local object: before=%#v after=%#v err=%v", before, after, err)
+	}
+	if _, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "original.txt"); err != nil {
+		t.Fatalf("local path changed before queued rename was sent: %v", err)
+	}
+	shadow, err := metadata.RemoteShadow(ctx, entry.Object.ID)
+	if err != nil || shadow.RemoteName != "renamed remotely.txt" || shadow.Size != 800 || shadow.DriveVersion != "2" || !shadow.Confirmed || shadow.Removed || !strings.Contains(shadow.CapabilitiesJSON, "canEdit") {
+		t.Fatalf("remote update shadow = %#v, err = %v", shadow, err)
+	}
+	pageToken, err = metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "queued", Removed: true}}, "", "live-3"); err != nil {
+		t.Fatal(err)
+	}
+	after, err = metadata.ObjectByID(ctx, entry.Object.ID)
+	if err != nil || after.Deleted || after.Size != before.Size {
+		t.Fatalf("remote removal discarded queued local object: %#v, err = %v", after, err)
+	}
+	shadow, err = metadata.RemoteShadow(ctx, entry.Object.ID)
+	if err != nil || !shadow.Removed || !shadow.Confirmed {
+		t.Fatalf("remote removal shadow = %#v, err = %v", shadow, err)
+	}
+}
+
+func TestReindexRetainsAncestorsOfQueuedLocalObjects(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	folder := indexedRemoteEntry("folder", "working", "root-drive")
+	folder.Object.MIMEType = rootMIMEType
+	child := indexedRemoteEntry("child", "draft.txt", "folder")
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", []RemoteEntry{folder}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "folder", "", []RemoteEntry{child}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := content.WritePending(ctx, WriteRequest{
+		OperationID: "op-nested-pending", ObjectID: child.Object.ID, Kind: domain.OperationWrite,
+		IdempotencyKey: "nested-pending", ExpectedSize: 5,
+	}, strings.NewReader("draft")); err != nil {
+		t.Fatal(err)
+	}
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "folder", Removed: true}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	rootChildren, err := metadata.Children(ctx, domain.RootObjectID)
+	if err != nil || len(rootChildren) != 1 || rootChildren[0].ObjectID != folder.Object.ID {
+		t.Fatalf("remote folder removal hid queued descendant: %#v, err = %v", rootChildren, err)
+	}
+	if err := metadata.BeginReindex(ctx, "snapshot-2", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	root, err := metadata.ObjectByID(ctx, domain.RootObjectID)
+	if err != nil || root.Deleted {
+		t.Fatalf("reindex marked namespace root deleted: %#v, err = %v", root, err)
+	}
+	rootChildren, err = metadata.Children(ctx, domain.RootObjectID)
+	if err != nil || len(rootChildren) != 1 || rootChildren[0].ObjectID != folder.Object.ID {
+		t.Fatalf("reindex hid ancestor folder: %#v, err = %v", rootChildren, err)
+	}
+	folderChildren, err := metadata.Children(ctx, folder.Object.ID)
+	if err != nil || len(folderChildren) != 1 || folderChildren[0].ObjectID != child.Object.ID {
+		t.Fatalf("reindex hid queued local child: %#v, err = %v", folderChildren, err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-3"); err != nil {
+		t.Fatal(err)
+	}
+	shadow, err := metadata.RemoteShadow(ctx, folder.Object.ID)
+	if err != nil || !shadow.Removed || !shadow.Confirmed {
+		t.Fatalf("missing ancestor shadow = %#v, err = %v", shadow, err)
 	}
 }
 

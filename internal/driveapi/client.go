@@ -268,6 +268,12 @@ func (c *Client) ListChanges(ctx context.Context, pageToken string) (ChangeList,
 	err := c.jsonRequest(ctx, requestSpec{
 		method: http.MethodGet, url: c.apiURL("changes", query), retrySafe: true,
 	}, &page)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusGone && apiErr.Kind == FailureInvalidRequest {
+		invalidToken := *apiErr
+		invalidToken.Kind = FailureInvalidPageToken
+		err = &invalidToken
+	}
 	return page, err
 }
 

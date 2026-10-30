@@ -184,6 +184,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	}{
 		{version: 1, name: "migrations/001_initial.sql"},
 		{version: 2, name: "migrations/002_initial_index.sql"},
+		{version: 3, name: "migrations/003_change_shadow.sql"},
 	}
 
 	rows, err := s.db.QueryContext(ctx, `SELECT version, checksum FROM schema_migrations ORDER BY version`)

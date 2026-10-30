@@ -199,6 +199,8 @@ func TestHTTPAndDriveReasonsMapToDistinctErrorsWithoutExposingMessages(t *testin
 		{name: "too many requests", status: http.StatusTooManyRequests, want: ErrRateLimited},
 		{name: "backend failure", status: http.StatusBadGateway, want: ErrTemporary},
 		{name: "bad request", status: http.StatusBadRequest, want: ErrInvalidRequest},
+		{name: "invalid page token reason", status: http.StatusBadRequest, reason: "invalidPageToken", want: ErrInvalidPageToken},
+		{name: "gone generic request", status: http.StatusGone, want: ErrInvalidRequest},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -224,6 +226,21 @@ func TestHTTPAndDriveReasonsMapToDistinctErrorsWithoutExposingMessages(t *testin
 				t.Fatalf("parsed reasons = %#v, want %q", apiErr.Reasons, testCase.reason)
 			}
 		})
+	}
+}
+
+func TestListChangesGoneMapsToInvalidPageToken(t *testing.T) {
+	server := newFakeServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/drive/v3/changes" || request.URL.Query().Get("pageToken") != "stale-token" {
+			t.Errorf("unexpected changes request: %s %s", request.Method, request.URL)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusGone)
+		_, _ = io.WriteString(writer, `{"error":{"code":410,"message":"cursor no longer accepted"}}`)
+	}))
+	client := newClientForServer(t, server, Config{Retry: RetryPolicy{MaxAttempts: 1}})
+	if _, err := client.ListChanges(context.Background(), "stale-token"); !errors.Is(err, ErrInvalidPageToken) {
+		t.Fatalf("ListChanges error = %v, want invalid page token", err)
 	}
 }
 

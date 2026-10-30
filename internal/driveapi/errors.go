@@ -13,6 +13,7 @@ var (
 	ErrQuotaExceeded        = errors.New("Drive quota was exceeded")
 	ErrTemporary            = errors.New("Drive service is temporarily unavailable")
 	ErrInvalidRequest       = errors.New("Drive rejected the request")
+	ErrInvalidPageToken     = errors.New("Drive change page token is invalid")
 	ErrUnexpectedResponse   = errors.New("Drive returned an unexpected response")
 	ErrUploadSessionExpired = errors.New("Drive upload session expired")
 )
@@ -20,13 +21,14 @@ var (
 type FailureKind string
 
 const (
-	FailureUnauthenticated FailureKind = "unauthenticated"
-	FailureForbidden       FailureKind = "forbidden"
-	FailureNotFound        FailureKind = "not_found"
-	FailureRateLimited     FailureKind = "rate_limited"
-	FailureQuotaExceeded   FailureKind = "quota_exceeded"
-	FailureTemporary       FailureKind = "temporary"
-	FailureInvalidRequest  FailureKind = "invalid_request"
+	FailureUnauthenticated  FailureKind = "unauthenticated"
+	FailureForbidden        FailureKind = "forbidden"
+	FailureNotFound         FailureKind = "not_found"
+	FailureRateLimited      FailureKind = "rate_limited"
+	FailureQuotaExceeded    FailureKind = "quota_exceeded"
+	FailureTemporary        FailureKind = "temporary"
+	FailureInvalidRequest   FailureKind = "invalid_request"
+	FailureInvalidPageToken FailureKind = "invalid_page_token"
 )
 
 // APIError intentionally omits Google's response message, which can contain
@@ -57,6 +59,8 @@ func (e *APIError) Is(target error) bool {
 		return e.Kind == FailureTemporary
 	case ErrInvalidRequest:
 		return e.Kind == FailureInvalidRequest
+	case ErrInvalidPageToken:
+		return e.Kind == FailureInvalidPageToken
 	default:
 		return false
 	}
@@ -84,6 +88,8 @@ func newAPIError(status int, reasons []string) *APIError {
 			kind = FailureRateLimited
 		case "dailyLimitExceeded", "storageQuotaExceeded", "activeItemCreationLimitExceeded", "teamDriveFileLimitExceeded":
 			kind = FailureQuotaExceeded
+		case "invalidPageToken", "pageTokenExpired", "startPageTokenExpired", "fullSyncRequired":
+			kind = FailureInvalidPageToken
 		}
 	}
 	return &APIError{StatusCode: status, Reasons: append([]string(nil), reasons...), Kind: kind}
