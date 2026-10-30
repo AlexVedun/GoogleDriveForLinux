@@ -138,7 +138,15 @@
 - Limitations: the worker is an injectable package and is not yet wired into the OAuth, writable FUSE, or desktop process lifecycle. `/dev/fuse` is unavailable, so no live mount or file-manager test ran. Process-kill recovery does not simulate power loss.
 - Git commit: `442d9e6` (`feat: sync queued operations with resumable recovery`).
 
+## Step 16 — remote conflict preservation and race handling
+
+- Changes from `changes.list` now compare the indexed Drive version with queued local work. A changed remote file remains at its current Drive name/version, while the latest complete pending local bytes are moved to a stable neighboring conflict file and queued as a separate Drive create. The local operation is marked `conflict`; an operation marker in `appProperties` prevents our own in-flight update from being misclassified.
+- Rename/trash conflicts retain the local operation intent and remote metadata. Conflict records can be listed and resolved: content edits support keep-both or keep-remote; namespace changes support keep-local (requeue against latest observed version) or keep-remote. The conflict UI is wired in step 19.
+- The worker compares the base Drive version before updating and reads the file after upload. If the postflight read finds another newer state, it preserves local bytes as a conflict file. These checks are best-effort: Google Drive v3 `files.update` documents no atomic version precondition/If-Match contract; a change between preflight and update can still be overwritten without detection. No live concurrent-account test is available.
+- Validation: `go test ./internal/store ./internal/indexer ./internal/syncworker -count=1` passed. It covers poller conflict preservation across restart and remote deletion, conflict resolution, local rename rebase, own-operation markers, and a Drive edit arriving during upload. Full checks are recorded after final validation below.
+- Limitations: real-account concurrency, visible Qt conflict controls, and a mounted FUSE conflict workflow remain unverified. The API's lack of documented conditional update semantics leaves a narrow overwrite race.
+
 ## Next
 
-Step 16: reconcile remote edits and prevent or surface write conflicts.
+Step 17: recursive offline pins and low-space handling.
 

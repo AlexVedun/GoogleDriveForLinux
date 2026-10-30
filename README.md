@@ -29,3 +29,5 @@ The `drivefs` command still supports a **local FUSE loopback spike** for protoco
 
 In the internal write-enabled FUSE implementation, a successful local `flush` or `fsync` means that file contents and the queued change are durably stored locally. It does not mean that the change has reached Google Drive. The sync worker advances the operation asynchronously and commits it only after verifying the Drive result. The Qt prototype explains the local state as “Saved locally; waiting to upload to Google Drive.” Pending data must survive restarts and must not be evicted from the cache. The CLI and GUI do not yet share live queue status.
 
+When a remote edit is detected before or after an upload, the implementation keeps the remote file and saves local bytes under a neighboring “local conflict” filename. Namespace conflicts retain the requested rename/trash operation for an explicit choice. Google Drive does not document an atomic version precondition for `files.update`, so an edit made after the worker's preflight read and before its update can still be overwritten without detection; the client does not claim race-free conflict protection.
+

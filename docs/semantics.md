@@ -65,8 +65,10 @@ For creates, use a pre-generated Drive ID when supported and persist it before s
 
 - Compare the queued edit's recorded base remote version/checksum with current metadata before applying an update.
 - On a detected remote change, preserve the remote object and local working copy; materialize the local copy under a deterministic, persisted conflict name in the same visible parent and notify the GUI. Never acknowledge a conflict by overwriting either copy.
-- A local deletion or rename that conflicts with an independent remote update is also a conflict; retain sufficient metadata/content to restore both outcomes.
-- Drive version preflight may have a race with a later update. Before claiming race-free conflict protection, prove whether the API supports an atomic conditional update. If it does not, document that limitation and choose a conservative policy for ambiguous results. Never describe a read-then-write check as atomic.
+- A local deletion or rename that conflicts with an independent remote update is also a conflict. Keep the current remote path visible and retain the local intent for the user's choice to keep remote or retry the local rename/trash against the newest observed version.
+- Match a change event carrying this application's active operation ID in `appProperties` to its in-flight operation, then reconcile it after the mutation response. Do not turn an echo of our own upload into a false conflict.
+- Drive v3 `files.update` has no documented conditional version precondition. Check the base version before upload and verify the returned/current state afterward, but treat this as best-effort detection only: another client can change the file after preflight and before the update, and that edit can be overwritten without detection. The API documentation and fake-server tests do not prove protection from this race. Do not describe the read-then-write check as atomic.
+- If a post-upload read shows a newer remote state, preserve the local bytes as a separate queued conflict file and display both versions. User actions are `keep-both` or `keep-remote` for content conflicts, and `keep-local` or `keep-remote` for namespace conflicts. The GUI exposes these actions in step 19.
 
 ## Cache and disk-space rules
 
