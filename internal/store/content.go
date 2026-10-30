@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -443,6 +444,22 @@ func (s *ContentStore) createPrepared(ctx context.Context, request WriteRequest,
 		return domain.Operation{}, fmt.Errorf("begin prepared write transaction: %w", err)
 	}
 	defer tx.Rollback()
+	payload := "{}"
+	if request.Kind == domain.OperationCreate {
+		var parentID, name string
+		entryErr := tx.QueryRowContext(ctx, `SELECT parent_object_id, remote_name FROM directory_entries WHERE object_id = ?`,
+			string(request.ObjectID)).Scan(&parentID, &name)
+		if entryErr != nil && !errors.Is(entryErr, sql.ErrNoRows) {
+			return domain.Operation{}, fmt.Errorf("read local create path: %w", entryErr)
+		}
+		if entryErr == nil {
+			encoded, err := json.Marshal(namespacePayload{ParentObjectID: domain.ObjectID(parentID), Name: name})
+			if err != nil {
+				return domain.Operation{}, fmt.Errorf("encode local create path: %w", err)
+			}
+			payload = string(encoded)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO content_versions (
 		version_id, object_id, kind, local_path, size_bytes, sha256, is_complete, is_current, created_at
 	) VALUES (?, ?, 'pending', ?, ?, NULL, 0, 0, ?)`, string(versionID), string(request.ObjectID), s.relativeBlobPath(versionID), request.ExpectedSize, formatTime(time.Now())); err != nil {
@@ -452,8 +469,8 @@ func (s *ContentStore) createPrepared(ctx context.Context, request WriteRequest,
 	if _, err := tx.ExecContext(ctx, `INSERT INTO operations (
 		operation_id, object_id, kind, state, idempotency_key, base_drive_version, content_version_id,
 		payload_json, created_at, updated_at
-	) VALUES (?, ?, ?, 'prepared', ?, ?, ?, '{}', ?, ?)`, string(request.OperationID), string(request.ObjectID),
-		string(request.Kind), request.IdempotencyKey, request.BaseDriveVersion, string(versionID), now, now); err != nil {
+	) VALUES (?, ?, ?, 'prepared', ?, ?, ?, ?, ?, ?)`, string(request.OperationID), string(request.ObjectID),
+		string(request.Kind), request.IdempotencyKey, request.BaseDriveVersion, string(versionID), payload, now, now); err != nil {
 		return domain.Operation{}, fmt.Errorf("record prepared write operation: %w", err)
 	}
 	dependencies, err := operationDependenciesForContentTx(ctx, tx, request.ObjectID, request.OperationID)
@@ -470,7 +487,7 @@ func (s *ContentStore) createPrepared(ctx context.Context, request WriteRequest,
 		ID: request.OperationID, ObjectID: request.ObjectID, Kind: request.Kind,
 		State: domain.OperationPrepared, IdempotencyKey: request.IdempotencyKey,
 		BaseDriveVersion: request.BaseDriveVersion, ContentVersionID: &versionID,
-		PayloadJSON: "{}", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		PayloadJSON: payload, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}, nil
 }
 

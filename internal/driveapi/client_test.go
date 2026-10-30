@@ -77,7 +77,7 @@ func TestDriveOperationsAgainstFakeServer(t *testing.T) {
 				return
 			}
 			var metadata FileMetadata
-			if err := json.NewDecoder(request.Body).Decode(&metadata); err != nil || metadata.ID != "reserved-1" {
+			if err := json.NewDecoder(request.Body).Decode(&metadata); err != nil || metadata.ID != "reserved-1" || metadata.AppProperties["gdlOperationId"] != "op-stable-id" {
 				t.Errorf("upload metadata = %#v, decode err = %v", metadata, err)
 			}
 			writer.Header().Set("Location", serverURL(request)+"/upload/session?opaque=secret-session")
@@ -165,7 +165,7 @@ func TestDriveOperationsAgainstFakeServer(t *testing.T) {
 	}
 
 	sessionURL, err := client.StartResumableUpload(ctx, UploadRequest{
-		Metadata: FileMetadata{ID: "reserved-1", Name: "upload.txt"}, Size: 8, MIMEType: "text/plain",
+		Metadata: FileMetadata{ID: "reserved-1", Name: "upload.txt", AppProperties: map[string]string{"gdlOperationId": "op-stable-id"}}, Size: 8, MIMEType: "text/plain",
 	})
 	if err != nil || !strings.Contains(sessionURL, "opaque=secret-session") {
 		t.Fatalf("upload session = %q, err = %v", sessionURL, err)
@@ -181,6 +181,28 @@ func TestDriveOperationsAgainstFakeServer(t *testing.T) {
 	progress, err = client.UploadChunk(ctx, sessionURL, UploadChunkRequest{Start: 6, End: 7, Total: 8, MIMEType: "text/plain", Body: strings.NewReader("gh")})
 	if err != nil || !progress.Complete || progress.File == nil || progress.File.ID != "reserved-1" || uploadCalls.Load() != 3 {
 		t.Fatalf("completed upload progress = %#v, calls=%d err=%v", progress, uploadCalls.Load(), err)
+	}
+}
+
+func TestEmptyUploadChunkSendsAnEmptyFinalRequest(t *testing.T) {
+	server := newFakeServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.Header.Get("Content-Length") != "0" || request.Header.Get("Content-Range") != "" {
+			t.Errorf("empty upload request headers = %#v", request.Header)
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil || len(body) != 0 {
+			t.Errorf("empty upload body = %q err=%v", body, err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(writer, `{"id":"empty-file","name":"empty.txt","mimeType":"text/plain","size":"0","version":"1","appProperties":{"gdlOperationId":"op-empty"}}`)
+	}))
+	client := newClientForServer(t, server, Config{Retry: RetryPolicy{MaxAttempts: 1}})
+	progress, err := client.UploadChunk(context.Background(), server.URL+"/upload/empty", UploadChunkRequest{
+		Start: 0, End: -1, Total: 0, MIMEType: "text/plain", Body: strings.NewReader(""), Empty: true,
+	})
+	if err != nil || !progress.Complete || progress.File == nil || progress.File.AppProperties["gdlOperationId"] != "op-empty" {
+		t.Fatalf("empty upload progress = %#v err=%v", progress, err)
 	}
 }
 

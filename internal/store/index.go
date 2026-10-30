@@ -517,7 +517,18 @@ func upsertRemoteEntry(ctx context.Context, tx *sql.Tx, parentObjectID domain.Ob
 	}
 	var inode uint64
 	err := tx.QueryRowContext(ctx, `SELECT inode FROM objects WHERE object_id = ?`, string(object.ID)).Scan(&inode)
+	if errors.Is(err, sql.ErrNoRows) {
+		var mappedObjectID string
+		lookupErr := tx.QueryRowContext(ctx, `SELECT object_id, inode FROM objects WHERE drive_file_id = ?`, string(*object.DriveFileID)).Scan(&mappedObjectID, &inode)
+		if lookupErr == nil {
+			object.ID = domain.ObjectID(mappedObjectID)
+			err = nil
+		} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return fmt.Errorf("find object by Drive file ID: %w", lookupErr)
+		}
+	}
 	if err == nil {
+		entry.Object.ID = object.ID
 		pending, pendingErr := hasPendingLocalOperation(ctx, tx, object.ID)
 		if pendingErr != nil {
 			return pendingErr
@@ -849,6 +860,11 @@ func boolInt(value bool) int {
 }
 
 func queueUnseenFolder(ctx context.Context, tx *sql.Tx, driveFileID string, objectID, parentObjectID domain.ObjectID) error {
+	var mappedObjectID string
+	if err := tx.QueryRowContext(ctx, `SELECT object_id FROM objects WHERE drive_file_id = ?`, driveFileID).Scan(&mappedObjectID); err != nil {
+		return fmt.Errorf("resolve indexed folder object ID: %w", err)
+	}
+	objectID = domain.ObjectID(mappedObjectID)
 	now := formatTime(time.Now())
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO initial_index_work (
 		folder_drive_file_id, object_id, parent_object_id, page_token, created_at, updated_at

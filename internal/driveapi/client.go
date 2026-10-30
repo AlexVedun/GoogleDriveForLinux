@@ -177,7 +177,7 @@ func (c *Client) UpdateFile(ctx context.Context, fileID string, patch FilePatch,
 	if err := validateID(fileID); err != nil {
 		return File{}, err
 	}
-	if patch.Name == nil && patch.Trashed == nil && len(addParents) == 0 && len(removeParents) == 0 {
+	if patch.Name == nil && patch.Trashed == nil && len(patch.AppProperties) == 0 && len(addParents) == 0 && len(removeParents) == 0 {
 		return File{}, errors.New("Drive file update must change at least one field")
 	}
 	body, err := json.Marshal(patch)
@@ -365,12 +365,30 @@ func (c *Client) StartResumableUpload(ctx context.Context, upload UploadRequest)
 }
 
 func (c *Client) UploadChunk(ctx context.Context, sessionURL string, chunk UploadChunkRequest) (UploadProgress, error) {
-	if chunk.Body == nil || chunk.Start < 0 || chunk.End < chunk.Start || chunk.Total <= chunk.End {
+	if chunk.Body == nil {
 		return UploadProgress{}, errors.New("invalid Drive upload chunk range")
 	}
 	parsed, err := c.validateSessionURL(sessionURL)
 	if err != nil {
 		return UploadProgress{}, err
+	}
+	if chunk.Empty {
+		if chunk.Total != 0 || chunk.Start != 0 || chunk.End != -1 {
+			return UploadProgress{}, errors.New("invalid empty Drive upload range")
+		}
+		response, cleanup, err := c.perform(ctx, requestSpec{
+			method: http.MethodPut, url: parsed.String(),
+			header: http.Header{"Content-Type": {contentTypeOrDefault(chunk.MIMEType)}, "Content-Length": {"0"}},
+			body:   func() io.Reader { return bytes.NewReader(nil) },
+		})
+		if err != nil {
+			return UploadProgress{}, err
+		}
+		defer cleanup()
+		return parseUploadProgress(response, 0)
+	}
+	if chunk.Start < 0 || chunk.End < chunk.Start || chunk.Total <= chunk.End {
+		return UploadProgress{}, errors.New("invalid Drive upload chunk range")
 	}
 	length := chunk.End - chunk.Start + 1
 	header := http.Header{

@@ -27,7 +27,7 @@ type API interface {
 }
 
 const (
-	defaultFileFields = "id,name,mimeType,parents,size,version,modifiedTime,webViewLink,md5Checksum,trashed,driveId,capabilities(canEdit,canTrash,canDownload,canRename,canMoveItemWithinDrive,canAddChildren,canRemoveChildren)"
+	defaultFileFields = "id,name,mimeType,parents,size,version,modifiedTime,webViewLink,md5Checksum,trashed,driveId,appProperties,capabilities(canEdit,canTrash,canDownload,canRename,canMoveItemWithinDrive,canAddChildren,canRemoveChildren)"
 	fileListFields    = "nextPageToken,files(" + defaultFileFields + ")"
 	changeListFields  = "nextPageToken,newStartPageToken,changes(fileId,removed,time,file(" + defaultFileFields + "))"
 )
@@ -43,34 +43,36 @@ type Capabilities struct {
 }
 
 type File struct {
-	ID           string
-	Name         string
-	MIMEType     string
-	Parents      []string
-	Size         int64
-	Version      string
-	ModifiedTime time.Time
-	WebViewLink  string
-	MD5Checksum  string
-	Trashed      bool
-	DriveID      string
-	Capabilities Capabilities
+	ID            string
+	Name          string
+	MIMEType      string
+	Parents       []string
+	Size          int64
+	Version       string
+	ModifiedTime  time.Time
+	WebViewLink   string
+	MD5Checksum   string
+	Trashed       bool
+	DriveID       string
+	AppProperties map[string]string
+	Capabilities  Capabilities
 }
 
 func (f *File) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		ID           string          `json:"id"`
-		Name         string          `json:"name"`
-		MIMEType     string          `json:"mimeType"`
-		Parents      []string        `json:"parents"`
-		Size         json.RawMessage `json:"size"`
-		Version      string          `json:"version"`
-		ModifiedTime time.Time       `json:"modifiedTime"`
-		WebViewLink  string          `json:"webViewLink"`
-		MD5Checksum  string          `json:"md5Checksum"`
-		Trashed      bool            `json:"trashed"`
-		DriveID      string          `json:"driveId"`
-		Capabilities Capabilities    `json:"capabilities"`
+		ID            string            `json:"id"`
+		Name          string            `json:"name"`
+		MIMEType      string            `json:"mimeType"`
+		Parents       []string          `json:"parents"`
+		Size          json.RawMessage   `json:"size"`
+		Version       string            `json:"version"`
+		ModifiedTime  time.Time         `json:"modifiedTime"`
+		WebViewLink   string            `json:"webViewLink"`
+		MD5Checksum   string            `json:"md5Checksum"`
+		Trashed       bool              `json:"trashed"`
+		DriveID       string            `json:"driveId"`
+		AppProperties map[string]string `json:"appProperties"`
+		Capabilities  Capabilities      `json:"capabilities"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -95,21 +97,23 @@ func (f *File) UnmarshalJSON(data []byte) error {
 		ID: raw.ID, Name: raw.Name, MIMEType: raw.MIMEType, Parents: raw.Parents,
 		Size: size, Version: raw.Version, ModifiedTime: raw.ModifiedTime,
 		WebViewLink: raw.WebViewLink, MD5Checksum: raw.MD5Checksum, Trashed: raw.Trashed,
-		DriveID: raw.DriveID, Capabilities: raw.Capabilities,
+		DriveID: raw.DriveID, AppProperties: raw.AppProperties, Capabilities: raw.Capabilities,
 	}
 	return nil
 }
 
 type FileMetadata struct {
-	ID       string   `json:"id,omitempty"`
-	Name     string   `json:"name,omitempty"`
-	MIMEType string   `json:"mimeType,omitempty"`
-	Parents  []string `json:"parents,omitempty"`
+	ID            string            `json:"id,omitempty"`
+	Name          string            `json:"name,omitempty"`
+	MIMEType      string            `json:"mimeType,omitempty"`
+	Parents       []string          `json:"parents,omitempty"`
+	AppProperties map[string]string `json:"appProperties,omitempty"`
 }
 
 type FilePatch struct {
-	Name    *string `json:"name,omitempty"`
-	Trashed *bool   `json:"trashed,omitempty"`
+	Name          *string           `json:"name,omitempty"`
+	Trashed       *bool             `json:"trashed,omitempty"`
+	AppProperties map[string]string `json:"appProperties,omitempty"`
 }
 
 type FileListOptions struct {
@@ -155,6 +159,7 @@ type UploadChunkRequest struct {
 	Total    int64
 	MIMEType string
 	Body     io.Reader
+	Empty    bool
 }
 
 type UploadProgress struct {
