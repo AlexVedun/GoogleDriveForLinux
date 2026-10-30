@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Google Drive for Linux
+Comment=Access Google Drive files from Linux
+Exec=driveapp
+Icon=google-drive-linux
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=true

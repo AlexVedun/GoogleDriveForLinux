@@ -2,7 +2,7 @@
 
 Go and Qt 6 desktop client that mounts a user's Google Drive **My Drive** folder through FUSE.
 
-The product is at the initial project setup stage. FUSE mounting, Google authentication, synchronization, offline writes, and the Qt interface are not implemented yet. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
+The product is at the prototype stage. The repository has a local-only FUSE loopback spike and a Qt 6 Widgets window/tray spike; neither connects to Google Drive or implements durable offline writes. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
 
 The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md); unresolved technical choices are tracked in [docs/decisions.md](docs/decisions.md).
 
@@ -11,10 +11,13 @@ The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md)
 ```sh
 go test ./...
 go vet ./...
-go build ./cmd/drivefs ./cmd/driveapp
+make build
+make qt-smoke
 ```
 
-Qt 6 development files and a C++ compiler are required once the Qt/MIQT application is added. FUSE device access is required to run mount integration tests.
+Building requires Go, a C++ compiler, `pkg-config`, Qt 6 Widgets development files, and the Qt Wayland plugin package. The MIQT Qt 6 package generates a large set of C++ wrappers, so the first Qt build can take several minutes. FUSE device access is required to run mount integration tests.
+
+`make appimage` downloads pinned linuxdeploy tools into the ignored `.tools/` directory, verifies their SHA-256 digests, and produces `dist/Google_Drive_for_Linux-x86_64.AppImage`. The packaging tools are fetched from the official [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy), [Qt plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-qt), and [AppImage plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-appimage) releases. This prototype package does not yet provide a Drive client.
 
 The current `drivefs` command is a **local FUSE loopback spike** for testing the FUSE protocol; it does not connect to Google Drive. With an existing empty mount directory and a separate disposable source directory, run `./bin/drivefs --source SOURCE_DIR --mountpoint MOUNT_DIR`. Run `./scripts/fuse-smoke.sh` for the destructive-operation smoke test; it creates and removes files only in its own temporary directory.
 

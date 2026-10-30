@@ -12,7 +12,7 @@
 - Added the operation contract, durability ordering, recovery rules, queue states, collision handling, cache policy, and conflict behavior in `docs/semantics.md`.
 - Recorded accepted architecture choices and experiments still required in `docs/decisions.md`.
 - Validation: documentation cross-check against the product and execution plans; no code changed in this step.
-- Git commit: pending.
+- Git commit: `ba82cbd` (`docs: define filesystem and sync semantics`).
 
 ## Step 3 — Go FUSE loopback spike
 
@@ -21,9 +21,19 @@
 - Validation: `go test ./...`, `go vet ./...`, `make build`, `bash -n scripts/fuse-smoke.sh`, and the binary `--version` passed.
 - Live FUSE mount check: not run because `/dev/fuse` is not visible in this execution environment. The smoke script returns its documented skip code 77. Run it in the host session with FUSE access.
 - This is an explicitly local-only protocol spike, not a Drive filesystem or durable queue.
+- Git commit: `7f4edbc` (`feat: prove Go FUSE read write and recovery path`).
+
+## Step 4 — Qt and AppImage spike
+
+- Added a MIQT/Qt 6 Widgets window with a directory picker, system tray icon and Open/Quit menu, plus a background status update delivered through the Qt event loop. The Qt application is pinned to its OS thread.
+- Added pinned, SHA-256-verified AppImage build tools and an x86_64 packaging script for `driveapp`, `drivefs`, Qt libraries, and X11/Wayland/offscreen platform plugins. The AppImage type-2 runtime is also fetched before packaging, so the build does not download it mid-run.
+- Validation: `go test ./...`, `go vet ./...`, `make build`, `QT_QPA_PLATFORM=offscreen ./bin/driveapp --smoke`, both binary `--version` commands, shell syntax checks, package build, `--appimage-extract`, extracted `AppRun --smoke`, and `APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen ./dist/Google_Drive_for_Linux-x86_64.AppImage --smoke` passed.
+- Toolchain tested: Go 1.26.10, MIQT 0.15.0, Qt 6.11.2, GCC 16.2.1, Fedora 44 x86_64; CGO and `pkg-config Qt6Widgets` are required.
+- Desktop limitation: although this process has GNOME Wayland environment variables, opening the compositor socket returns `EPERM`; a minimal C++ Qt application also aborts in that condition. Visual tray display, folder picker, and close/reopen behavior therefore remain unverified in an unrestricted desktop session. FUSE mounting remains unavailable because `/dev/fuse` is absent.
+- Packaging limitation: this proves extraction and an offscreen Qt launch on Fedora 44 only. Old glibc compatibility, actual Wayland/X11 rendering, and a real Drive client are not verified. The ordinary AppImage launch also needs a host FUSE configuration; extraction-and-run is only a packaging test.
 - Git commit: pending.
 
 ## Next
 
-Step 4: verify Qt 6 Widgets, tray support, GUI thread dispatch, and AppImage packaging.
+Step 5: define the persistent domain model and SQLite metadata/queue schema.
 
