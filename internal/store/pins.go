@@ -10,9 +10,9 @@ import (
 )
 
 type OfflinePin struct {
-	ObjectID  domain.ObjectID
-	Recursive bool
-	PinnedAt  time.Time
+	ObjectID  domain.ObjectID `json:"object_id"`
+	Recursive bool            `json:"recursive"`
+	PinnedAt  time.Time       `json:"pinned_at"`
 }
 
 // SetOfflinePin stores a direct pin. Recursive pins apply to the selected folder

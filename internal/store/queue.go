@@ -94,6 +94,31 @@ func (s *Store) OperationByID(ctx context.Context, operationID domain.OperationI
 		FROM operations WHERE operation_id = ?`, string(operationID)))
 }
 
+// ListOperations returns queue rows in stable creation order. Callers should
+// expose only status fields; payloads and resumable URLs may contain private data.
+func (s *Store) ListOperations(ctx context.Context) ([]domain.Operation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT operation_id, object_id, kind, state,
+		idempotency_key, base_drive_version, content_version_id, payload_json, resumable_session_url,
+		resumable_offset, attempt_count, next_attempt_at, last_error_code, last_error_message, created_at, updated_at
+		FROM operations ORDER BY created_at, operation_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list queued operations: %w", err)
+	}
+	defer rows.Close()
+	operations := make([]domain.Operation, 0)
+	for rows.Next() {
+		operation, err := (&ContentStore{metadata: s}).scanOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		operations = append(operations, operation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read queued operations: %w", err)
+	}
+	return operations, nil
+}
+
 func (s *Store) EntryForObject(ctx context.Context, objectID domain.ObjectID) (domain.DirectoryEntry, error) {
 	var entry domain.DirectoryEntry
 	var parentID, foundObjectID string

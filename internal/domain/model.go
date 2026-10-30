@@ -122,12 +122,12 @@ const (
 )
 
 type Event struct {
-	ID          EventID
-	ObjectID    *ObjectID
-	OperationID *OperationID
-	Kind        EventKind
-	Code        string
-	DetailsJSON string
-	CreatedAt   time.Time
-	ResolvedAt  time.Time
+	ID          EventID      `json:"id"`
+	ObjectID    *ObjectID    `json:"object_id,omitempty"`
+	OperationID *OperationID `json:"operation_id,omitempty"`
+	Kind        EventKind    `json:"kind"`
+	Code        string       `json:"code"`
+	DetailsJSON string       `json:"details_json"`
+	CreatedAt   time.Time    `json:"created_at"`
+	ResolvedAt  time.Time    `json:"resolved_at,omitempty"`
 }
