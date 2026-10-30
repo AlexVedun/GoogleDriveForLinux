@@ -92,7 +92,16 @@
 - Limitations: `Poller.Poll` drains a polling cycle but is not yet scheduled or wired into the desktop/FUSE processes; process lifecycle wiring is a later step. Real-account token behavior and live Drive changes remain unverified.
 - Git commit: `4c373ac` (`feat: apply Drive changes incrementally`).
 
+## Step 11 — stable indexed namespace through FUSE
+
+- Added a read-only FUSE tree backed by the ready SQLite index: `lookup`, `getattr`, deterministic `readdir`, persistent database inode numbers, owner/mode/size/block/time attributes, and immediate metadata checks after deletion. Directory enumeration reads a single ordered SQLite snapshot with names, inode numbers, and MIME types.
+- Added a `drivefs --database PATH --mountpoint DIR` mode for an existing ready index. The mountpoint must exist and be empty; the indexed mount is read-only while content reads and writes are implemented in later steps. The loopback spike remains available with `--source`.
+- Native Google Workspace documents and other `application/vnd.google-apps.*` non-folder types remain visible with unknown dirent type and return `EOPNOTSUPP` on lookup/open. Unsupported mutations return `EROFS`; the mount also uses the read-only option.
+- Validation: `make check` passed; `go test -race ./internal/fusefs ./internal/store -count=1` passed; CLI `--version` and `--help` passed; `git diff --check` passed. Tests cover a directory with over 2,000 entries, duplicate-name suffixes, stable inode values across FUSE trees, attributes, empty folders, unsupported native files, read-only operations, deletion, and concurrent readdir during index updates.
+- Limitations: `/dev/fuse` is unavailable in this environment, so no live mount was performed. The CLI requires a ready database produced outside this command; OAuth/indexing integration and content reads remain later work.
+- Git commit: `05e95c5` (`feat: expose stable Drive namespace through FUSE`).
+
 ## Next
 
-Step 11: expose the stable SQLite namespace through FUSE lookup, attributes, and directory listing.
+Step 12: add version-stable reads through a bounded disk cache.
 
