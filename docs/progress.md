@@ -120,7 +120,16 @@
 - Limitations: `/dev/fuse` is unavailable, so no mounted file-manager test was possible. The `drivefs --database` CLI remains read-only and is not wired to the write-enabled constructor or OAuth/cache setup. The editor temporary-file → rename case will be verified after step 14 implements rename.
 - Git commit: `a6bd98f` (`feat: persist local file writes before acknowledging FUSE`).
 
+## Step 14 — folders, rename, move, and trash
+
+- Added transactional local `mkdir`, `rename`, `unlink`, and `rmdir` operations. Each namespace mutation and its queued operation commit together; folder moves reject cycles and replacement rejects mismatched types or non-empty folders. FUSE returns POSIX `ENOTEMPTY`, `ENOTDIR`, `EISDIR`, `EEXIST`, and `EXDEV` where applicable.
+- Added durable queue dependencies so child creation waits for parent creation, rename waits for source changes and replacement trash, and folder trash waits for direct child trash. Local editor temporary-file replacement preserves the new object's identity and content while queuing trash for the old target. Remote moves preserve the Drive file ID.
+- Extended indexed Drive metadata fields and checks to use `canAddChildren`, `canRemoveChildren`, `canRename`, `canMoveItemWithinDrive`, and `canTrash`. README and D-015 document that the indexed FUSE implementation is injectable/tested but not yet connected to the CLI sync worker.
+- Validation: `make check` passed with loopback available for OAuth and fake Drive HTTP tests; `go test -race ./internal/store ./internal/contentcache ./internal/fusefs -count=1`, `make qt-smoke`, and `git diff --check` passed. Tests cover offline rename/move, editor temp-file → atomic replacement, create/trash before any sender runs, recursive file-manager-style deletion, capability denial, dependency ordering, and SQLite close/reopen persistence.
+- Limitations: `/dev/fuse` is unavailable, so file-manager operations were verified through FUSE node methods rather than a live mount. No Google Drive requests or live trash/move operations were performed. The CLI is still read-only and there is no queue worker yet.
+- Git commit: `7dd82b9` (`feat: queue folder rename move and trash operations`).
+
 ## Next
 
-Step 14: queue folder creation, rename/move, unlink, and rmdir operations.
+Step 15: execute queued operations with dependency ordering and resumable upload recovery.
 
