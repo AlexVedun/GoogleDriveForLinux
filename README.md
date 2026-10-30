@@ -8,6 +8,8 @@ The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md)
 
 OAuth setup, Secret Service requirements, and sign-in behavior are documented in [docs/oauth.md](docs/oauth.md).
 
+The [operating guide](docs/operating-guide.md) covers installation, FUSE and Secret Service requirements, local data paths, recovery, sign-out, and safe removal. The [release readiness record](docs/release-readiness.md) lists what passed locally and what still needs a real desktop, Google account, and FUSE mount.
+
 Drive API error categories and retry policy are documented in [docs/drive-api-errors.md](docs/drive-api-errors.md).
 
 ## Build and check
@@ -23,7 +25,7 @@ Building requires Go, a C++ compiler, `pkg-config`, Qt 6 Widgets development fil
 
 `make appimage` downloads pinned linuxdeploy tools into the ignored `.tools/` directory, verifies their SHA-256 digests, and produces `dist/Google_Drive_for_Linux-x86_64.AppImage`. The packaging tools are fetched from the official [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy), [Qt plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-qt), and [AppImage plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-appimage) releases.
 
-Make the AppImage executable and launch it with `./Google_Drive_for_Linux-x86_64.AppImage`. Configure `GOOGLE_OAUTH_CLIENT_ID` for the desktop OAuth client before launching. The system needs a working FUSE setup to mount the Drive filesystem; extracting the AppImage with `--appimage-extract` avoids FUSE for launching the bundle but does not provide FUSE access to the mounted Drive. The image contains its third-party license texts under `usr/share/doc/google-drive-linux/`; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the bundled components and release licensing checks.
+Make the AppImage executable and launch it with `chmod +x dist/Google_Drive_for_Linux-x86_64.AppImage` followed by `GOOGLE_OAUTH_CLIENT_ID=your-desktop-client-id ./dist/Google_Drive_for_Linux-x86_64.AppImage`. The system needs a working FUSE setup to mount the Drive filesystem; extracting the AppImage with `--appimage-extract` avoids FUSE for launching the bundle but does not provide FUSE access to the mounted Drive. The image contains its third-party license texts under `usr/share/doc/google-drive-linux/`; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the bundled components and release licensing checks.
 
 The direct `drivefs --source SOURCE_DIR --mountpoint MOUNT_DIR` mode remains a **local FUSE loopback spike** for protocol tests. The normal Qt app starts one per-user `drivefs --ipc-server` service. Set `GOOGLE_OAUTH_CLIENT_ID` before launching `driveapp` (for example, `GOOGLE_OAUTH_CLIENT_ID=your-desktop-client-id ./bin/driveapp`); after signing in, the service indexes My Drive and enables the write-enabled FUSE mount. Without OAuth configuration, a ready index can still be mounted read-only. Run `./scripts/fuse-smoke.sh` for the loopback test; it creates and removes files only in its own temporary directory.
 

@@ -180,7 +180,19 @@
 - Limitations: an ordinary AppImage launch failed because this system has no usable `fusermount`/`/dev/fuse`; extraction and extraction-and-run work, but neither provides FUSE access to the Drive mount. There is no active `org.freedesktop.secrets` owner on the session bus, no live Google account, and no visible GNOME/KDE session. The bundle includes Qt platform plugins and additional host-discovered Qt image-format plugins; the exact transitive library license inventory and any required relinking/source materials remain a release audit item. The Google `drive` OAuth scope also needs the applicable Google verification before public distribution.
 - Git commit: `e62cac6` (`build: package Go and Qt application as AppImage`).
 
-## Next
+## Step 21 — release checks and operating documentation
 
-Step 21: run release checks and finish operating and release documentation.
+- Added the operating guide for requirements, build and launch, local data paths, durability, recovery, sign-out, uninstall, and safe local-data removal. `docs/oauth.md` now describes the restricted Drive scope and the public verification path. `docs/release-readiness.md` records the acceptance matrix, local evidence, and remaining external gates. Updated stale stack/sync decisions and the remaining engineering estimate; the full desktop/release gates remain outside this environment.
+- The AppImage packager now inventories every bundled shared library and Qt plugin against RPM metadata, copies their package license texts, and writes a 55-package manifest. Final Fedora bundle includes 81 system license files. Manual review of source/relinking, GPL, patent, and project licensing obligations remains a public-release gate.
+- Validation: `go test ./... -count=1` and `go vet ./...` passed. The first test attempt used a workspace `TMPDIR` whose long path exceeded the Unix socket path limit; the passing run used short `TMPDIR=/tmp/gdltmp`. `make appimage` passed with RPM license collection; `--appimage-extract`, extracted `AppRun --smoke` with host Qt/plugin search paths disabled, bundled `drivefs --version`, and the Secret Service unavailable status/IPC quit smoke passed. The no-tray Qt smoke kept the main window available. Final AppImage SHA-256: `8cbe656a574c52b423dcd33ccd6183eb416d7159e9a442c869c280783c5a366b`.
+- Race validation: focused race suites for store, content cache, FUSE, indexer, Drive API, worker, IPC, and controller passed in earlier steps. The aggregate `go test -race ./...` did not complete: the parallel attempt hit `/tmp` quota, and a serial retry restarted the generated MIQT/Qt C++ build and was stopped. This remains less evidence than a successful full race run.
+- Release limitations: ordinary AppImage launch is blocked here by missing `fusermount` and `/dev/fuse`; there was no real Google account or mounted FUSE test, active Secret Service, visible GNOME/KDE session, or oldest-system compatibility check. The OAuth scope is restricted and the public review has not been submitted. The project has not selected a source-code license. Do not treat the AppImage as a public release.
+- Git commit: `b8ebf31` (`build: inventory bundled AppImage licenses`).
+- Git commit: pending final documentation commit.
+
+## Completion status
+
+Local implementation steps 1–21 and their available checks are complete. The
+development AppImage and source remain **not release-ready** until the external
+gates in [docs/release-readiness.md](release-readiness.md) are resolved.
 
