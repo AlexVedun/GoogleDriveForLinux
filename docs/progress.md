@@ -54,7 +54,16 @@
 - Limitations: SIGKILL tests validate process termination and restart on the current Fedora 44 filesystem; they do not simulate power failure or storage-controller behavior. Real FUSE mounts remain unavailable in this environment, and this step does not upload to Google Drive.
 - Git commit: `382e12b` (`feat: persist content versions and recover journal`).
 
+## Step 7 — desktop OAuth and system credential storage
+
+- Added an installed-app OAuth flow with an IPv4 loopback listener on a random port, random state validation, PKCE S256, offline access, browser launch, callback timeout, token refresh with persistence of rotated refresh tokens, reauthorization handling for `invalid_grant`, and token revocation.
+- Added a Secret Service-backed credential store through go-keyring. It has no plaintext or SQLite fallback, maps missing entries, honors caller deadlines, and hides backend diagnostics that could contain sensitive values.
+- Documented manual Google Cloud setup and current sign-in boundaries in `docs/oauth.md`; no real credentials or account data are stored in the repository. The UI does not yet collect client settings or invoke sign-in; that wiring belongs to later app steps.
+- Validation: `go test ./internal/auth ./internal/secretstore -count=1` passed with local loopback access. Tests cover PKCE, wrong-state rejection, valid callback, callback timeout, access denial, successful refresh and token rotation, invalid grant, credential-store failures, and revoke behavior. The secret-store suite covers round-trip/delete, missing entries, sanitized failures, and deadlines. No real Google account or live GNOME/KDE keyring was used.
+- Limitations: this execution sandbox blocks loopback sockets by default, so the OAuth unit suite required an escalated test invocation. Live Google login, browser behavior, and GNOME Keyring/KDE Wallet availability remain unverified.
+- Git commit: pending.
+
 ## Next
 
-Step 7: implement desktop OAuth and secure token storage without persisting credentials in SQLite.
+Step 8: implement the narrow Google Drive API adapter and deterministic fake server.
 

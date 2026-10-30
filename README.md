@@ -6,6 +6,8 @@ The product is at the prototype stage. The repository has a local-only FUSE loop
 
 The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md); unresolved technical choices are tracked in [docs/decisions.md](docs/decisions.md).
 
+OAuth setup, Secret Service requirements, and the limits of the current sign-in implementation are documented in [docs/oauth.md](docs/oauth.md).
+
 ## Build and check
 
 ```sh
