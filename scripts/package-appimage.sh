@@ -52,6 +52,7 @@ export NO_STRIP=1 # bundled linuxdeploy strip is too old for Fedora 44 RELR ELF 
 # linuxdeploy-plugin-qt writes a qt.conf that crashes this MIQT binary when
 # used from an extracted AppImage. AppRun sets the bundle paths explicitly.
 rm -f "$app_dir/usr/bin/qt.conf"
+"$root_dir/scripts/bundle-appimage-rpm-licenses.sh" "$app_dir"
 "$tools_dir/linuxdeploy-plugin-appimage-x86_64.AppImage" --appimage-extract-and-run \
     --appdir "$app_dir"
 
