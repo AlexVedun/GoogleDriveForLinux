@@ -52,7 +52,7 @@
 - Driver experiment: the complete store suite passed with `mattn/go-sqlite3` v1.14.52 and with CGO-free `modernc.org/sqlite` v1.61.0 under `CGO_ENABLED=0`. Both passed SIGKILL/reopen at all six durability boundaries. The mattn store-test executable was 9.4 MB; modernc was 12.0 MB. Since MIQT already requires CGO and mattn is smaller, D-009 selects mattn. Decision O-005 is resolved.
 - Validation: `go test ./internal/store -count=1`, `go test -race ./internal/store -count=1`, the same store suite with CGO-free modernc, `make check` (`go test ./...`, `go vet ./...`, both builds), and `git diff --check` passed. Tests cover zero-byte and streamed 32 MiB content, concurrent writers and reservations, insufficient-space and size-mismatch refusal, failed reads, idempotency, safe orphan cleanup, preserved old versions, recovery idempotence, and actual SIGKILL at each boundary.
 - Limitations: SIGKILL tests validate process termination and restart on the current Fedora 44 filesystem; they do not simulate power failure or storage-controller behavior. Real FUSE mounts remain unavailable in this environment, and this step does not upload to Google Drive.
-- Git commit: pending.
+- Git commit: `382e12b` (`feat: persist content versions and recover journal`).
 
 ## Next
 
