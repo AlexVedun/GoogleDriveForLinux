@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 	"google-drive-linux/internal/store"
 )
 
-func TestPollerResumesCommittedPagesAndReindexesWithoutLosingQueuedWrite(t *testing.T) {
+func TestPollerResumesCommittedPagesAndReindexesWithConflictCopy(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.db")
 	metadata, err := store.Open(databasePath)
@@ -56,7 +57,7 @@ func TestPollerResumesCommittedPagesAndReindexesWithoutLosingQueuedWrite(t *test
 		t.Fatal(err)
 	}
 	const localRevision = "local revision that must survive remote changes"
-	write, err := content.WritePending(ctx, store.WriteRequest{
+	_, err = content.WritePending(ctx, store.WriteRequest{
 		OperationID: "op-local-pending", ObjectID: "drive:queued-file", Kind: domain.OperationWrite,
 		IdempotencyKey: "queued-local-revision", BaseDriveVersion: "1", ExpectedSize: int64(len(localRevision)),
 	}, strings.NewReader(localRevision))
@@ -78,9 +79,30 @@ func TestPollerResumesCommittedPagesAndReindexesWithoutLosingQueuedWrite(t *test
 	if err != nil || status.ChangeToken != "live-1" || status.CatchupPageToken != "poll-page-2" {
 		t.Fatalf("interrupted poll cursor = %#v, err = %v", status, err)
 	}
-	shadow, err := metadata.RemoteShadow(ctx, "drive:queued-file")
-	if err != nil || shadow.RemoteName != "renamed-remotely.txt" || shadow.DriveVersion != "2" || !shadow.Confirmed {
-		t.Fatalf("first page shadow = %#v, err = %v", shadow, err)
+	operations, err := metadata.OperationsForObject(ctx, "drive:queued-file")
+	if err != nil || len(operations) != 1 || operations[0].State != domain.OperationConflict {
+		t.Fatalf("remote change did not conflict the local write: %#v, err = %v", operations, err)
+	}
+	copyEntry, err := localConflictEntry(ctx, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyObjectID := copyEntry.ObjectID
+	copyVersion, err := content.CurrentContentVersion(ctx, copyObjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localFile, _, err := content.OpenContentVersion(ctx, copyVersion.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved, readErr := io.ReadAll(localFile)
+	closeErr := localFile.Close()
+	if readErr != nil || closeErr != nil || string(preserved) != localRevision {
+		t.Fatalf("local conflict content = %q, readErr=%v closeErr=%v", preserved, readErr, closeErr)
+	}
+	if _, err := metadata.RemoteShadow(ctx, "drive:queued-file"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("first-page conflict was left as an unresolved shadow: %v", err)
 	}
 	if err := metadata.Close(); err != nil {
 		t.Fatal(err)
@@ -102,12 +124,8 @@ func TestPollerResumesCommittedPagesAndReindexesWithoutLosingQueuedWrite(t *test
 		t.Fatalf("resumed poll cursor = %#v, err = %v", status, err)
 	}
 	itemAfter, err := metadata.ObjectByID(ctx, "drive:queued-file")
-	if err != nil || itemAfter.Deleted || itemAfter.Inode != itemBefore.Inode || itemAfter.Size != itemBefore.Size {
-		t.Fatalf("remote removal discarded queued object: before=%#v after=%#v err=%v", itemBefore, itemAfter, err)
-	}
-	shadow, err = metadata.RemoteShadow(ctx, "drive:queued-file")
-	if err != nil || !shadow.Removed || !shadow.Confirmed {
-		t.Fatalf("remote removal shadow = %#v, err = %v", shadow, err)
+	if err != nil || !itemAfter.Deleted || itemAfter.Inode != itemBefore.Inode || itemAfter.Size != remoteUpdate.Size {
+		t.Fatalf("remote removal did not preserve the distinct local copy: before=%#v after=%#v err=%v", itemBefore, itemAfter, err)
 	}
 
 	// Force an invalid saved start token, then make the remote snapshot omit
@@ -125,22 +143,22 @@ func TestPollerResumesCommittedPagesAndReindexesWithoutLosingQueuedWrite(t *test
 		t.Fatalf("reindex status = %#v, err = %v", status, err)
 	}
 	itemAfter, err = metadata.ObjectByID(ctx, "drive:queued-file")
-	if err != nil || itemAfter.Deleted || itemAfter.Inode != itemBefore.Inode || itemAfter.Size != itemBefore.Size {
-		t.Fatalf("reindex discarded queued object: %#v, err = %v", itemAfter, err)
+	if err != nil || !itemAfter.Deleted || itemAfter.Inode != itemBefore.Inode || itemAfter.Size != remoteUpdate.Size {
+		t.Fatalf("reindex discarded or resurrected remote object incorrectly: %#v, err = %v", itemAfter, err)
 	}
 	children, err := metadata.Children(ctx, domain.RootObjectID)
-	if err != nil || len(children) != 1 || children[0].ObjectID != "drive:queued-file" {
-		t.Fatalf("queued object disappeared from namespace: %#v, err = %v", children, err)
-	}
-	shadow, err = metadata.RemoteShadow(ctx, "drive:queued-file")
-	if err != nil || !shadow.Removed || !shadow.Confirmed {
-		t.Fatalf("confirmed reindex removal shadow = %#v, err = %v", shadow, err)
+	if err != nil || len(children) != 1 || children[0].ObjectID != copyObjectID {
+		t.Fatalf("local conflict copy disappeared from namespace: %#v, err = %v", children, err)
 	}
 	reopenedContent, err := store.NewContentStore(metadata, contentRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, _, err := reopenedContent.OpenContentVersion(ctx, *write.Operation.ContentVersionID)
+	reopenedVersion, err := reopenedContent.CurrentContentVersion(ctx, copyObjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _, err := reopenedContent.OpenContentVersion(ctx, reopenedVersion.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +172,19 @@ func TestPollerResumesCommittedPagesAndReindexesWithoutLosingQueuedWrite(t *test
 	if string(buffer) != localRevision {
 		t.Fatalf("local content after reindex = %q, want %q", buffer, localRevision)
 	}
+}
+
+func localConflictEntry(ctx context.Context, metadata *store.Store) (domain.DirectoryEntry, error) {
+	children, err := metadata.Children(ctx, domain.RootObjectID)
+	if err != nil {
+		return domain.DirectoryEntry{}, err
+	}
+	for _, child := range children {
+		if strings.Contains(child.DisplayName, "local conflict") {
+			return child, nil
+		}
+	}
+	return domain.DirectoryEntry{}, errors.New("local conflict copy was not materialized")
 }
 
 func TestPollerIndexesNewFoldersBeforeAdvancingToReady(t *testing.T) {

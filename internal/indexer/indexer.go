@@ -236,7 +236,8 @@ func remoteEntry(file driveapi.File, parentDriveFileID string) (store.RemoteEntr
 		CreatedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
 	}
-	return store.RemoteEntry{Object: object, RemoteName: file.Name, ParentDriveFileID: parentDriveFileID}, nil
+	return store.RemoteEntry{Object: object, RemoteName: file.Name, ParentDriveFileID: parentDriveFileID,
+		AppProperties: file.AppProperties}, nil
 }
 
 func parentQuery(driveFileID string) string {

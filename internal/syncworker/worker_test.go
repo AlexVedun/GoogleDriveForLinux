@@ -27,19 +27,20 @@ import (
 )
 
 type memoryDrive struct {
-	files                   map[string]driveapi.File
-	contents                map[string][]byte
-	sessions                map[string]*memorySession
-	generated               int
-	sessionCount            int
-	createCount             int
-	completedUploads        int
-	loseNextCreateResponse  bool
-	loseNextFinalChunk      bool
-	incompleteNextFinalFile bool
-	failFirstStatus         bool
-	queries                 []string
-	updates                 []string
+	files                     map[string]driveapi.File
+	contents                  map[string][]byte
+	sessions                  map[string]*memorySession
+	generated                 int
+	sessionCount              int
+	createCount               int
+	completedUploads          int
+	loseNextCreateResponse    bool
+	loseNextFinalChunk        bool
+	incompleteNextFinalFile   bool
+	externalChangeAfterUpload bool
+	failFirstStatus           bool
+	queries                   []string
+	updates                   []string
 }
 
 type memorySession struct {
@@ -188,6 +189,16 @@ func (d *memoryDrive) UploadChunk(_ context.Context, sessionURL string, chunk dr
 	d.contents[session.fileID] = append([]byte(nil), session.data...)
 	session.complete = true
 	d.completedUploads++
+	if d.externalChangeAfterUpload {
+		d.externalChangeAfterUpload = false
+		external := file
+		external.Version = nextVersion(file.Version)
+		externalContent := []byte("external concurrent edit")
+		sum := md5.Sum(externalContent)
+		external.MD5Checksum = hex.EncodeToString(sum[:])
+		d.files[session.fileID] = external
+		d.contents[session.fileID] = externalContent
+	}
 	if d.loseNextFinalChunk {
 		d.loseNextFinalChunk = false
 		return driveapi.UploadProgress{}, driveapi.ErrTemporary
@@ -324,6 +335,53 @@ func TestWorkerRefetchesIncompleteFinalUploadResponse(t *testing.T) {
 	}
 	if len(drive.queries) < 2 || drive.queries[len(drive.queries)-1] != "get:reserved-1" {
 		t.Fatalf("incomplete final response was not verified by file ID: queries=%v", drive.queries)
+	}
+}
+
+func TestWorkerPreservesBothVersionsWhenDriveChangesDuringUpload(t *testing.T) {
+	ctx, metadata, content, drive, worker := newWorkerFixture(t)
+	object := addRemoteFile(t, ctx, metadata, drive, "remote-race", "race.txt", []byte("base"), "v1")
+	_, err := content.WritePending(ctx, store.WriteRequest{ObjectID: object.ID, Kind: domain.OperationWrite,
+		IdempotencyKey: "write-race", BaseDriveVersion: "v1", ExpectedSize: 5}, strings.NewReader("local"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive.externalChangeAfterUpload = true
+	if worked, err := worker.RunOne(ctx); !worked || !errors.Is(err, ErrRemoteConflict) {
+		t.Fatalf("racing upload worked=%v err=%v; want a preserved conflict", worked, err)
+	}
+	if string(drive.contents["remote-race"]) != "external concurrent edit" {
+		t.Fatalf("remote edit was overwritten: %q", drive.contents["remote-race"])
+	}
+	children, err := metadata.Children(ctx, domain.RootObjectID)
+	if err != nil || len(children) != 2 {
+		t.Fatalf("remote and local conflict entries = %#v, err=%v", children, err)
+	}
+	var localCopyID domain.ObjectID
+	for _, child := range children {
+		if child.ObjectID != object.ID {
+			localCopyID = child.ObjectID
+		}
+	}
+	if localCopyID == "" {
+		t.Fatal("local write was not moved to a conflict copy")
+	}
+	version, err := content.CurrentContentVersion(ctx, localCopyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _, err := content.OpenContentVersion(ctx, version.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || string(data) != "local" {
+		t.Fatalf("preserved local bytes=%q readErr=%v closeErr=%v", data, readErr, closeErr)
+	}
+	operations, err := metadata.OperationsForObject(ctx, object.ID)
+	if err != nil || len(operations) != 1 || operations[0].State != domain.OperationConflict {
+		t.Fatalf("racing write state = %#v err=%v", operations, err)
 	}
 }
 
@@ -793,6 +851,54 @@ func TestWorkerConflictsWhenRemoteVersionChangedBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestWorkerPreservesRemotePathWhenRenameOrTrashRaces(t *testing.T) {
+	for _, kind := range []string{"rename", "trash"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx, metadata, _, drive, worker := newWorkerFixture(t)
+			object := addRemoteFile(t, ctx, metadata, drive, "remote-namespace-"+kind, "namespace.txt", []byte("content"), "v1")
+			remote := drive.files[string(*object.DriveFileID)]
+			remote.Name, remote.Version = "remote-name.txt", "v2"
+			drive.files[string(*object.DriveFileID)] = remote
+			if kind == "rename" {
+				if _, err := metadata.QueueRename(ctx, domain.RootObjectID, "namespace.txt",
+					domain.RootObjectID, "local-name.txt", true); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := metadata.QueueTrash(ctx, domain.RootObjectID, "namespace.txt", false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			operations, err := metadata.OperationsForObject(ctx, object.ID)
+			if err != nil || len(operations) != 1 {
+				t.Fatalf("namespace operation = %#v err=%v", operations, err)
+			}
+			if worked, err := worker.RunOne(ctx); !worked || !errors.Is(err, ErrRemoteConflict) {
+				t.Fatalf("racing namespace operation worked=%v err=%v", worked, err)
+			}
+			state, err := metadata.OperationByID(ctx, operations[0].ID)
+			if err != nil || state.State != domain.OperationConflict {
+				t.Fatalf("%s operation state=%#v err=%v", kind, state, err)
+			}
+			updated, err := metadata.ObjectByID(ctx, object.ID)
+			if err != nil || updated.DriveVersion != "v2" || updated.Deleted {
+				t.Fatalf("remote object state after %s conflict=%#v err=%v", kind, updated, err)
+			}
+			if _, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "remote-name.txt"); err != nil {
+				t.Fatalf("remote path was not restored after %s conflict: %v", kind, err)
+			}
+			if len(drive.updates) != 0 || drive.files[string(*object.DriveFileID)].Trashed {
+				t.Fatalf("%s conflict was sent to Drive: updates=%v file=%#v", kind, drive.updates,
+					drive.files[string(*object.DriveFileID)])
+			}
+			conflicts, err := metadata.Conflicts(ctx)
+			if err != nil || len(conflicts) != 1 || conflicts[0].OperationID != operations[0].ID {
+				t.Fatalf("%s conflict event = %#v err=%v", kind, conflicts, err)
+			}
+		})
+	}
+}
+
 func TestWorkerAdvancesBaseVersionAcrossQueuedLocalWrites(t *testing.T) {
 	ctx, metadata, content, drive, worker := newWorkerFixture(t)
 	object := addRemoteFile(t, ctx, metadata, drive, "remote-sequence", "sequence.txt", []byte("base"), "v1")
@@ -860,7 +966,7 @@ func TestWorkerExecutesRenameTrashAndZeroLengthUpload(t *testing.T) {
 	if worked, err := worker.RunOne(ctx); !worked || err != nil {
 		t.Fatalf("zero-byte update worked=%v err=%v", worked, err)
 	}
-	if drive.files["remote-empty"].Size != 0 || drive.files["remote-empty"].AppProperties[operationProperty] == "" {
+	if drive.files["remote-empty"].Size != 0 || drive.files["remote-empty"].AppProperties[domain.DriveOperationProperty] == "" {
 		t.Fatalf("zero-byte file metadata = %#v", drive.files["remote-empty"])
 	}
 

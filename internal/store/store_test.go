@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,7 +301,7 @@ func TestIncrementalChangePagesCommitCursorAtomicallyAndRejectReplay(t *testing.
 	}
 }
 
-func TestRemoteChangeShadowPreservesQueuedLocalWriteAndPath(t *testing.T) {
+func TestRemoteChangeForksQueuedLocalWriteAndKeepsRemoteVersion(t *testing.T) {
 	ctx := context.Background()
 	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
 	if err != nil {
@@ -348,15 +349,54 @@ func TestRemoteChangeShadowPreservesQueuedLocalWriteAndPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err := metadata.ObjectByID(ctx, entry.Object.ID)
-	if err != nil || after.Size != before.Size || after.DriveVersion != before.DriveVersion || after.Deleted {
-		t.Fatalf("remote update overwrote queued local object: before=%#v after=%#v err=%v", before, after, err)
+	if err != nil || after.Size != 800 || after.DriveVersion != "2" || after.Deleted {
+		t.Fatalf("remote object was not updated to its confirmed version: before=%#v after=%#v err=%v", before, after, err)
 	}
-	if _, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "original.txt"); err != nil {
-		t.Fatalf("local path changed before queued rename was sent: %v", err)
+	if _, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "renamed remotely.txt"); err != nil {
+		t.Fatalf("remote path is not visible beside the preserved local copy: %v", err)
 	}
-	shadow, err := metadata.RemoteShadow(ctx, entry.Object.ID)
-	if err != nil || shadow.RemoteName != "renamed remotely.txt" || shadow.Size != 800 || shadow.DriveVersion != "2" || !shadow.Confirmed || shadow.Removed || !strings.Contains(shadow.CapabilitiesJSON, "canEdit") {
-		t.Fatalf("remote update shadow = %#v, err = %v", shadow, err)
+	if _, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "original.txt"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale local path remains beside the remote version: %v", err)
+	}
+	operations, err := metadata.OperationsForObject(ctx, entry.Object.ID)
+	if err != nil || len(operations) != 1 || operations[0].State != domain.OperationConflict {
+		t.Fatalf("conflicted write operations = %#v, err = %v", operations, err)
+	}
+	children, err := metadata.Children(ctx, domain.RootObjectID)
+	if err != nil || len(children) != 2 {
+		t.Fatalf("remote and local conflict entries = %#v, err = %v", children, err)
+	}
+	var conflictObjectID domain.ObjectID
+	var conflictName string
+	for _, child := range children {
+		if child.ObjectID != entry.Object.ID {
+			conflictObjectID, conflictName = child.ObjectID, child.DisplayName
+		}
+	}
+	if conflictObjectID == "" || !strings.Contains(conflictName, "local conflict") {
+		t.Fatalf("local conflict copy entry = %q, object=%q", conflictName, conflictObjectID)
+	}
+	version, err := content.CurrentContentVersion(ctx, conflictObjectID)
+	if err != nil || version.Size != int64(len(localBytes)) {
+		t.Fatalf("local conflict content version = %#v, err = %v", version, err)
+	}
+	file, _, err := content.OpenContentVersion(ctx, version.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || string(preserved) != localBytes {
+		t.Fatalf("local conflict bytes = %q, readErr=%v closeErr=%v", preserved, readErr, closeErr)
+	}
+	if _, err := metadata.RemoteShadow(ctx, entry.Object.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("confirmed write conflict still has an unresolved shadow: %v", err)
+	}
+	conflicts, err := metadata.Conflicts(ctx)
+	if err != nil || len(conflicts) != 1 || conflicts[0].LocalCopyObjectID != conflictObjectID ||
+		conflicts[0].LocalCopyName != conflictName || conflicts[0].RemoteName != "renamed remotely.txt" ||
+		conflicts[0].RemoteVersion != "2" {
+		t.Fatalf("write conflict record = %#v, err = %v", conflicts, err)
 	}
 	pageToken, err = metadata.BeginChangePoll(ctx)
 	if err != nil {
@@ -366,12 +406,133 @@ func TestRemoteChangeShadowPreservesQueuedLocalWriteAndPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err = metadata.ObjectByID(ctx, entry.Object.ID)
-	if err != nil || after.Deleted || after.Size != before.Size {
-		t.Fatalf("remote removal discarded queued local object: %#v, err = %v", after, err)
+	if err != nil || !after.Deleted || after.Size != 800 {
+		t.Fatalf("remote removal did not remove only the remote object: %#v, err = %v", after, err)
 	}
-	shadow, err = metadata.RemoteShadow(ctx, entry.Object.ID)
-	if err != nil || !shadow.Removed || !shadow.Confirmed {
-		t.Fatalf("remote removal shadow = %#v, err = %v", shadow, err)
+	children, err = metadata.Children(ctx, domain.RootObjectID)
+	if err != nil || len(children) != 1 || children[0].ObjectID != conflictObjectID {
+		t.Fatalf("remote removal discarded local conflict copy: %#v, err = %v", children, err)
+	}
+	if err := metadata.ResolveConflict(ctx, conflicts[0].EventID, "keep-remote"); err != nil {
+		t.Fatal(err)
+	}
+	conflicts, err = metadata.Conflicts(ctx)
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("resolved conflict remains visible: %#v, err = %v", conflicts, err)
+	}
+	copyObject, err := metadata.ObjectByID(ctx, conflictObjectID)
+	if err != nil || !copyObject.Deleted {
+		t.Fatalf("keep-remote did not queue removal of the local conflict copy: %#v, err = %v", copyObject, err)
+	}
+}
+
+func TestRemoteRenameConflictCanRetryLocalIntentAgainstLatestVersion(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	entry := indexedRemoteEntry("namespace-conflict", "old.txt", "root-drive")
+	entry.Object.DriveVersion = "1"
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", []RemoteEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := metadata.QueueRename(ctx, domain.RootObjectID, "old.txt", domain.RootObjectID, "local-name.txt", false); err != nil {
+		t.Fatal(err)
+	}
+	operations, err := metadata.OperationsForObject(ctx, entry.Object.ID)
+	if err != nil || len(operations) != 1 || operations[0].Kind != domain.OperationRename {
+		t.Fatalf("local rename operation = %#v, err = %v", operations, err)
+	}
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := indexedRemoteEntry("namespace-conflict", "remote-name.txt", "root-drive")
+	changed.Object.DriveVersion = "2"
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "namespace-conflict", Entry: &changed}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	operations, err = metadata.OperationsForObject(ctx, entry.Object.ID)
+	if err != nil || len(operations) != 1 || operations[0].State != domain.OperationConflict {
+		t.Fatalf("remote edit did not stop local rename: %#v, err = %v", operations, err)
+	}
+	conflicts, err := metadata.Conflicts(ctx)
+	if err != nil || len(conflicts) != 1 || conflicts[0].LocalOperationKind != domain.OperationRename ||
+		conflicts[0].LocalIntent != "rename or move to local-name.txt" || conflicts[0].RemoteName != "remote-name.txt" {
+		t.Fatalf("namespace conflict record = %#v, err = %v", conflicts, err)
+	}
+	if err := metadata.ResolveConflict(ctx, conflicts[0].EventID, "keep-local"); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := metadata.OperationByID(ctx, operations[0].ID)
+	if err != nil || operation.State != domain.OperationQueued || operation.BaseDriveVersion != "2" {
+		t.Fatalf("selected local intent was not rebased on latest Drive version: %#v, err = %v", operation, err)
+	}
+	conflicts, err = metadata.Conflicts(ctx)
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("resolved namespace conflict remains visible: %#v, err = %v", conflicts, err)
+	}
+}
+
+func TestOwnOperationMarkerAvoidsFalseRemoteWriteConflict(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	entry := indexedRemoteEntry("marked-write", "draft.txt", "root-drive")
+	entry.Object.DriveVersion = "1"
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", []RemoteEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write, err := content.WritePending(ctx, WriteRequest{OperationID: "op-marked-write", ObjectID: entry.Object.ID,
+		Kind: domain.OperationWrite, IdempotencyKey: "marked-write", BaseDriveVersion: "1", ExpectedSize: 4}, strings.NewReader("edit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.SetOperationState(ctx, write.Operation.ID, domain.OperationUploading, "", "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := indexedRemoteEntry("marked-write", "draft.txt", "root-drive")
+	changed.Object.DriveVersion = "2"
+	changed.AppProperties = map[string]string{domain.DriveOperationProperty: string(write.Operation.ID)}
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "marked-write", Entry: &changed}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := metadata.OperationByID(ctx, write.Operation.ID)
+	if err != nil || operation.State != domain.OperationUploading {
+		t.Fatalf("own marked change became a conflict: %#v, err = %v", operation, err)
+	}
+	conflicts, err := metadata.Conflicts(ctx)
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("own marked change created a conflict: %#v, err = %v", conflicts, err)
+	}
+	shadow, err := metadata.RemoteShadow(ctx, entry.Object.ID)
+	if err != nil || !shadow.Confirmed || shadow.DriveVersion != "2" {
+		t.Fatalf("own marked change was not retained for post-commit reconciliation: %#v, err = %v", shadow, err)
 	}
 }
 

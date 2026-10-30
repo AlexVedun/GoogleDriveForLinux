@@ -33,6 +33,7 @@ type RemoteEntry struct {
 	Object            domain.Object
 	RemoteName        string
 	ParentDriveFileID string
+	AppProperties     map[string]string
 }
 
 type RemoteChange struct {
@@ -534,7 +535,37 @@ func upsertRemoteEntry(ctx context.Context, tx *sql.Tx, parentObjectID domain.Ob
 			return pendingErr
 		}
 		if pending {
-			return writeRemoteShadow(ctx, tx, parentObjectID, entry, false, confirmed)
+			markerMatches, err := hasLocalOperationMarker(ctx, tx, object.ID, entry.AppProperties[domain.DriveOperationProperty])
+			if err != nil {
+				return err
+			}
+			if markerMatches {
+				return writeRemoteShadow(ctx, tx, parentObjectID, entry, false, confirmed)
+			}
+			var currentVersion string
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(drive_version, '') FROM objects WHERE object_id = ?`,
+				string(object.ID)).Scan(&currentVersion); err != nil {
+				return fmt.Errorf("read current Drive version before conflict detection: %w", err)
+			}
+			if entry.Object.DriveVersion == "" || entry.Object.DriveVersion == currentVersion {
+				return writeRemoteShadow(ctx, tx, parentObjectID, entry, false, confirmed)
+			}
+			operationID, kind, err := firstActiveOperation(ctx, tx, object.ID)
+			if err != nil {
+				return err
+			}
+			if operationID == "" {
+				return writeRemoteShadow(ctx, tx, parentObjectID, entry, false, confirmed)
+			}
+			if kind == domain.OperationWrite {
+				if _, err := preserveWriteConflictTx(ctx, tx, object.ID, operationID, entry); err != nil {
+					return err
+				}
+				return nil
+			}
+			if err := markRemoteNamespaceConflictTx(ctx, tx, object.ID, operationID, entry); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM remote_change_shadow WHERE object_id = ?`, string(object.ID)); err != nil {
 			return fmt.Errorf("clear remote-change shadow for clean object: %w", err)
@@ -764,7 +795,8 @@ func markRemoteObjectDeleted(ctx context.Context, tx *sql.Tx, driveFileID string
 
 func hasPendingLocalOperation(ctx context.Context, tx *sql.Tx, objectID domain.ObjectID) (bool, error) {
 	var exists int
-	err := tx.QueryRowContext(ctx, `SELECT 1 FROM operations WHERE object_id = ? AND state <> 'committed' LIMIT 1`, string(objectID)).Scan(&exists)
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM operations WHERE object_id = ?
+		AND state IN ('prepared', 'queued', 'uploading', 'retryable-error', 'needs-reconcile') LIMIT 1`, string(objectID)).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -780,7 +812,8 @@ func hasPendingLocalSubtree(ctx context.Context, tx *sql.Tx, objectID domain.Obj
 		SELECT ? UNION SELECT de.object_id FROM directory_entries de JOIN subtree s ON de.parent_object_id = s.object_id
 	)
 	SELECT 1 FROM operations op JOIN subtree s ON s.object_id = op.object_id
-	WHERE op.state <> 'committed' LIMIT 1`, string(objectID)).Scan(&exists)
+	WHERE op.state IN ('prepared', 'queued', 'uploading', 'retryable-error', 'needs-reconcile') LIMIT 1`,
+		string(objectID)).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

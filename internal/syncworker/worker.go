@@ -22,7 +22,6 @@ import (
 
 const (
 	GoogleFolderMIMEType = "application/vnd.google-apps.folder"
-	operationProperty    = "gdlOperationId"
 	defaultChunkSize     = int64(8 * 1024 * 1024)
 )
 
@@ -171,7 +170,7 @@ func (w *Worker) processWrite(ctx context.Context, operation domain.Operation, o
 	if object.DriveFileID == nil {
 		return w.setFailure(ctx, operation, errors.New("write operation has no Drive file ID"), false)
 	}
-	metadata := driveapi.FileMetadata{AppProperties: map[string]string{operationProperty: string(operation.ID)}}
+	metadata := driveapi.FileMetadata{AppProperties: map[string]string{domain.DriveOperationProperty: string(operation.ID)}}
 	return w.processResumable(ctx, operation, object, metadata, "", "", version, checksum, false)
 }
 
@@ -212,8 +211,8 @@ func (w *Worker) processResumable(ctx context.Context, operation domain.Operatio
 		if create {
 			return w.markConflict(ctx, operation, "reserved_id_in_use")
 		}
-		if remote.AppProperties[operationProperty] == string(operation.ID) {
-			return w.holdForReconciliation(ctx, operation, "upload_marker_without_matching_content", "Drive reports this operation but its content could not be verified")
+		if remote.AppProperties[domain.DriveOperationProperty] == string(operation.ID) {
+			return w.preserveWriteConflict(ctx, operation, object, remote)
 		}
 	} else if !errors.Is(getErr, driveapi.ErrNotFound) {
 		return w.setFailure(ctx, operation, getErr, false)
@@ -227,7 +226,7 @@ func (w *Worker) processResumable(ctx context.Context, operation domain.Operatio
 			baseVersion = object.DriveVersion
 		}
 		if baseVersion != "" && remote.Version != baseVersion {
-			return w.markConflict(ctx, operation, "remote_version_changed")
+			return w.preserveWriteConflict(ctx, operation, object, remote)
 		}
 	}
 
@@ -394,6 +393,13 @@ func (w *Worker) processRename(ctx context.Context, operation domain.Operation, 
 	if remote.Name == payload.NewName && contains(remote.Parents, string(*newParent.DriveFileID)) {
 		return w.commit(ctx, operation, remote)
 	}
+	baseVersion := operation.BaseDriveVersion
+	if baseVersion == "" {
+		baseVersion = object.DriveVersion
+	}
+	if baseVersion != "" && remote.Version != baseVersion {
+		return w.preserveNamespaceConflict(ctx, operation, object, remote)
+	}
 	var addParent, removeParent []string
 	if payload.OldParentObjectID != payload.NewParentObjectID {
 		oldParent, err := w.metadata.ObjectByID(ctx, payload.OldParentObjectID)
@@ -405,7 +411,7 @@ func (w *Worker) processRename(ctx context.Context, operation domain.Operation, 
 	}
 	name := payload.NewName
 	updated, err := w.drive.UpdateFile(ctx, string(*object.DriveFileID), driveapi.FilePatch{
-		Name: &name, AppProperties: map[string]string{operationProperty: string(operation.ID)},
+		Name: &name, AppProperties: map[string]string{domain.DriveOperationProperty: string(operation.ID)},
 	}, addParent, removeParent)
 	if err != nil {
 		return w.setFailure(ctx, operation, err, true)
@@ -442,9 +448,16 @@ func (w *Worker) processTrash(ctx context.Context, operation domain.Operation, o
 	if remote.Trashed {
 		return w.commit(ctx, operation, remote)
 	}
+	baseVersion := operation.BaseDriveVersion
+	if baseVersion == "" {
+		baseVersion = object.DriveVersion
+	}
+	if baseVersion != "" && remote.Version != baseVersion {
+		return w.preserveNamespaceConflict(ctx, operation, object, remote)
+	}
 	trashed := true
 	updated, err := w.drive.UpdateFile(ctx, string(*object.DriveFileID), driveapi.FilePatch{
-		Trashed: &trashed, AppProperties: map[string]string{operationProperty: string(operation.ID)},
+		Trashed: &trashed, AppProperties: map[string]string{domain.DriveOperationProperty: string(operation.ID)},
 	}, nil, nil)
 	if err != nil {
 		return w.setFailure(ctx, operation, err, true)
@@ -490,7 +503,7 @@ func (w *Worker) fileMetadata(ctx context.Context, operation domain.Operation, o
 		mimeType = "application/octet-stream"
 	}
 	return driveapi.FileMetadata{Name: payload.Name, MIMEType: mimeType, Parents: []string{string(*parent.DriveFileID)},
-		AppProperties: map[string]string{operationProperty: string(operation.ID)}}, string(*parent.DriveFileID), payload.Name, nil
+		AppProperties: map[string]string{domain.DriveOperationProperty: string(operation.ID)}}, string(*parent.DriveFileID), payload.Name, nil
 }
 
 func (w *Worker) ensureDriveID(ctx context.Context, object domain.Object) (domain.Object, error) {
@@ -545,7 +558,7 @@ func checksumContent(file *os.File, version domain.ContentVersion) (string, erro
 func (w *Worker) uploadMatches(file driveapi.File, operation domain.Operation, object domain.Object, version domain.ContentVersion,
 	checksum string, create bool, parentID, name string) bool {
 	if file.ID == "" || file.Version == "" || object.DriveFileID == nil || file.ID != string(*object.DriveFileID) ||
-		file.AppProperties[operationProperty] != string(operation.ID) || file.Size != version.Size || file.MIMEType != object.MIMEType {
+		file.AppProperties[domain.DriveOperationProperty] != string(operation.ID) || file.Size != version.Size || file.MIMEType != object.MIMEType {
 		return false
 	}
 	if version.Size > 0 && (file.MD5Checksum == "" || !strings.EqualFold(file.MD5Checksum, checksum)) {
@@ -560,7 +573,7 @@ func (w *Worker) uploadMatches(file driveapi.File, operation domain.Operation, o
 func (w *Worker) metadataCreateMatches(file driveapi.File, operation domain.Operation, object domain.Object, metadata driveapi.FileMetadata,
 	parentID, name string, version *domain.ContentVersion, checksum string) bool {
 	if object.DriveFileID == nil || file.ID != string(*object.DriveFileID) || file.Version == "" || file.Name != name || file.MIMEType != metadata.MIMEType ||
-		file.AppProperties[operationProperty] != string(operation.ID) || !contains(file.Parents, parentID) {
+		file.AppProperties[domain.DriveOperationProperty] != string(operation.ID) || !contains(file.Parents, parentID) {
 		return false
 	}
 	if version == nil {
@@ -590,6 +603,20 @@ func (w *Worker) commitUploadedFile(ctx context.Context, operation domain.Operat
 			return w.holdForReconciliation(ctx, operation, "upload_completion_unverified", "Drive did not return matching ID, operation marker, size, checksum, and path")
 		}
 		file = &verified
+	}
+	if !create {
+		current, err := w.drive.GetFile(ctx, file.ID)
+		if errors.Is(err, driveapi.ErrNotFound) {
+			return w.markConflict(ctx, operation, "remote_object_missing_after_upload")
+		}
+		if err != nil {
+			return w.setFailure(ctx, operation, err, false)
+		}
+		if current.Version != file.Version ||
+			!w.uploadMatches(current, operation, object, version, checksum, false, parentID, name) {
+			return w.preserveWriteConflict(ctx, operation, object, current)
+		}
+		file = &current
 	}
 	return w.commit(ctx, operation, *file)
 }
@@ -629,6 +656,70 @@ func (w *Worker) markConflict(ctx context.Context, operation domain.Operation, c
 		return err
 	}
 	return fmt.Errorf("%w (%s)", ErrRemoteConflict, code)
+}
+
+func (w *Worker) preserveWriteConflict(ctx context.Context, operation domain.Operation, object domain.Object,
+	remote driveapi.File) error {
+	if object.DriveFileID == nil || remote.ID != string(*object.DriveFileID) ||
+		remote.Name == "" || remote.MIMEType == "" || remote.Version == "" || remote.Size < 0 {
+		return w.markConflict(ctx, operation, "remote_version_changed_unverified")
+	}
+	entry, err := w.remoteConflictEntry(ctx, object, remote)
+	if err != nil {
+		return w.setFailure(ctx, operation, err, false)
+	}
+	_, err = w.metadata.PreserveWriteConflict(ctx, operation.ID, entry)
+	if err != nil {
+		return errors.Join(ErrRemoteConflict, err)
+	}
+	return fmt.Errorf("%w (remote_version_changed; both versions were preserved)", ErrRemoteConflict)
+}
+
+func (w *Worker) preserveNamespaceConflict(ctx context.Context, operation domain.Operation, object domain.Object,
+	remote driveapi.File) error {
+	entry, err := w.remoteConflictEntry(ctx, object, remote)
+	if err != nil {
+		return w.setFailure(ctx, operation, err, false)
+	}
+	if err := w.metadata.PreserveNamespaceConflict(ctx, operation.ID, entry); err != nil {
+		return errors.Join(ErrRemoteConflict, err)
+	}
+	return fmt.Errorf("%w (remote_namespace_changed; the remote path was kept)", ErrRemoteConflict)
+}
+
+func (w *Worker) remoteConflictEntry(ctx context.Context, object domain.Object, remote driveapi.File) (store.RemoteEntry, error) {
+	if object.DriveFileID == nil || remote.ID != string(*object.DriveFileID) ||
+		remote.Name == "" || remote.MIMEType == "" || remote.Version == "" || remote.Size < 0 {
+		return store.RemoteEntry{}, errors.New("remote conflict metadata is incomplete")
+	}
+	parentDriveID := ""
+	if len(remote.Parents) == 1 {
+		parentDriveID = remote.Parents[0]
+	}
+	if parentDriveID == "" {
+		entry, err := w.metadata.EntryForObject(ctx, object.ID)
+		if err != nil {
+			return store.RemoteEntry{}, err
+		}
+		parent, err := w.metadata.ObjectByID(ctx, entry.ParentID)
+		if err != nil || parent.DriveFileID == nil {
+			return store.RemoteEntry{}, errors.New("remote conflict parent is unavailable")
+		}
+		parentDriveID = string(*parent.DriveFileID)
+	}
+	capabilities, err := json.Marshal(remote.Capabilities)
+	if err != nil {
+		return store.RemoteEntry{}, err
+	}
+	driveID := domain.DriveFileID(remote.ID)
+	return store.RemoteEntry{
+		Object: domain.Object{
+			ID: object.ID, DriveFileID: &driveID, MIMEType: remote.MIMEType, Size: remote.Size,
+			DriveVersion: remote.Version, ModifiedAt: remote.ModifiedTime, WebViewLink: remote.WebViewLink,
+			CapabilitiesJSON: string(capabilities),
+		},
+		RemoteName: remote.Name, ParentDriveFileID: parentDriveID, AppProperties: remote.AppProperties,
+	}, nil
 }
 
 func (w *Worker) holdForReconciliation(ctx context.Context, operation domain.Operation, code, message string) error {

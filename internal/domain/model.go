@@ -11,6 +11,8 @@ type EventID string
 
 const RootObjectID ObjectID = "root"
 
+const DriveOperationProperty = "gdlOperationId"
+
 type Object struct {
 	ID               ObjectID
 	DriveFileID      *DriveFileID

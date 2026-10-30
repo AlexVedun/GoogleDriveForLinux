@@ -260,9 +260,10 @@ func (s *Store) CommitRemoteOperation(ctx context.Context, operationID domain.Op
 	}
 	if remote.DriveVersion != "" {
 		if _, err := tx.ExecContext(ctx, `UPDATE operations SET base_drive_version = ?, updated_at = ?
-			WHERE object_id = ? AND operation_id <> ? AND kind = 'write' AND state IN ('prepared', 'queued', 'retryable-error')`,
+			WHERE object_id = ? AND operation_id <> ? AND kind IN ('write', 'rename', 'trash')
+			AND state IN ('prepared', 'queued', 'retryable-error', 'needs-reconcile')`,
 			remote.DriveVersion, formatTime(now), string(op.ObjectID), string(operationID)); err != nil {
-			return fmt.Errorf("advance dependent write base version: %w", err)
+			return fmt.Errorf("advance dependent operation base version: %w", err)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE operations SET state = 'committed', resumable_session_url = '',
