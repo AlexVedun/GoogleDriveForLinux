@@ -73,7 +73,17 @@
 - Limitations: only fake-server behavior is verified; Google Cloud project quotas, actual token refresh over HTTP, live Drive data, and real resumable-session behavior remain unverified.
 - Git commit: `11c9aca` (`feat: add Drive API adapter and fake server`).
 
+## Step 9 — initial My Drive indexing
+
+- Added SQLite migration 2 with a durable folder/page work queue, a scanned-folder journal, snapshot token, catch-up page token, and index phase. Version-1 databases upgrade without losing their root or inode state.
+- Added a parent-scoped recursive indexer. It captures `changes.getStartPageToken` before reading the root or listing children, pages through every reachable My Drive folder, stores file ID/parent/name/MIME/size/version/modified time/link/capabilities, and excludes trashed files, shared-drive files, and results outside the requested parent.
+- Page data and its next-page cursor commit in one SQLite transaction. Rejected persisted file-list page tokens restart that folder from page one; upserts preserve object IDs/inodes and do not duplicate entries. Exact duplicate names receive stable ID-derived suffixes. Slash, NUL, `.` and `..` are mapped to safe POSIX display components while preserving the exact Drive name.
+- The index remains `indexing` until changes from the pre-traversal token have been applied transactionally. If catch-up discovers an unscanned folder, the index scans it and performs another catch-up from the new start token before becoming `ready`.
+- Validation: `go test -race ./internal/store ./internal/indexer -count=1` passed. Fake-API tests index more than 2,000 files across short pages, include empty/late folders, long and colliding names, metadata updates, deletes, moves, trashed/shared/out-of-tree items, and assert token-before-traversal order. Restart tests close and reopen SQLite after interruptions at each folder page and catch-up page; atomicity tests prove a failed batch does not advance its cursor or leave partial objects. No Google requests were made.
+- Limitations: Google root ID behavior, actual API pagination/change ordering, account-specific shared-with-me behavior, and the end-to-end OAuth-to-index integration have not been tested against a real account. The `drivefs` and Qt processes still do not invoke the indexer.
+- Git commit: pending.
+
 ## Next
 
-Step 9: implement initial My Drive indexing with a start token captured before paginated traversal and a catch-up changes pass.
+Step 10: implement ongoing changes polling with atomic page application, safe stale-token recovery, and protection for local queued edits.
 

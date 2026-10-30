@@ -20,8 +20,8 @@ func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	version, err := store.SchemaVersion(ctx)
-	if err != nil || version != 1 {
-		t.Fatalf("schema version = %d, err = %v; want 1, nil", version, err)
+	if err != nil || version != 2 {
+		t.Fatalf("schema version = %d, err = %v; want 2, nil", version, err)
 	}
 	root, err := store.ObjectByID(ctx, domain.RootObjectID)
 	if err != nil {
@@ -82,6 +82,139 @@ func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("database permissions = %04o, want 0600", got)
+	}
+}
+
+func TestExistingVersionOneDatabaseUpgradesToVersionTwo(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite3", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := migrationFiles.ReadFile("migrations/001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyMigration(ctx, legacy, 1, checksumMigration(script), string(script)); err != nil {
+		t.Fatal(err)
+	}
+	now := formatTime(time.Now())
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO inode_sequence(inode) VALUES (?)`, RootInode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO objects (
+		object_id, drive_file_id, inode, mime_type, size_bytes, capabilities_json,
+		is_deleted, created_at, updated_at
+	) VALUES (?, NULL, ?, ?, 0, '{}', 0, ?, ?)`, domain.RootObjectID, RootInode, rootMIMEType, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO sync_state(singleton, change_token, index_state, updated_at)
+		VALUES (1, '', 'empty', ?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	version, err := upgraded.SchemaVersion(ctx)
+	if err != nil || version != 2 {
+		t.Fatalf("upgraded schema version = %d, err = %v", version, err)
+	}
+	root, err := upgraded.ObjectByID(ctx, domain.RootObjectID)
+	if err != nil || root.Inode != RootInode {
+		t.Fatalf("upgraded root = %#v, err = %v", root, err)
+	}
+	status, err := upgraded.InitialIndexStatus(ctx)
+	if err != nil || status.State != "empty" || status.Phase != "none" {
+		t.Fatalf("upgraded initial index status = %#v, err = %v", status, err)
+	}
+}
+
+func TestInitialIndexPageBatchAndProgressCommitAtomically(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	if err := metadata.BeginInitialIndex(ctx, "snapshot-token", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	first := indexedRemoteEntry("first", "first.txt", "root-drive")
+	invalid := indexedRemoteEntry("invalid", "invalid.txt", "root-drive")
+	invalid.Object.DriveFileID = nil
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "next-page", []RemoteEntry{first, invalid}); err == nil {
+		t.Fatal("committed an invalid remote entry batch")
+	}
+	if _, err := metadata.ObjectByID(ctx, first.Object.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("failed page partially inserted first object: %v", err)
+	}
+	folders, err := metadata.InitialIndexFolders(ctx)
+	if err != nil || len(folders) != 1 || folders[0].PageToken != "" {
+		t.Fatalf("failed page advanced the cursor: folders=%#v err=%v", folders, err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "next-page", []RemoteEntry{first}); err != nil {
+		t.Fatal(err)
+	}
+	folders, err = metadata.InitialIndexFolders(ctx)
+	if err != nil || len(folders) != 1 || folders[0].PageToken != "next-page" {
+		t.Fatalf("successful page cursor = %#v, err = %v", folders, err)
+	}
+}
+
+func TestInitialCatchupChangesAndCursorCommitAtomically(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	if err := metadata.BeginInitialIndex(ctx, "snapshot-token", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	first := indexedRemoteEntry("first", "first.txt", "root-drive")
+	invalid := RemoteChange{DriveFileID: ""}
+	if err := metadata.CommitInitialChanges(ctx, []RemoteChange{{DriveFileID: "first", Entry: &first}, invalid}, "next-change", ""); err == nil {
+		t.Fatal("committed an invalid initial change page")
+	}
+	if _, err := metadata.ObjectByID(ctx, first.Object.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("failed change page partially applied first object: %v", err)
+	}
+	status, err := metadata.InitialIndexStatus(ctx)
+	if err != nil || status.Phase != "catching-up" || status.CatchupPageToken != "snapshot-token" {
+		t.Fatalf("failed change page advanced cursor: status=%#v err=%v", status, err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, []RemoteChange{{DriveFileID: "first", Entry: &first}}, "next-change", ""); err != nil {
+		t.Fatal(err)
+	}
+	status, err = metadata.InitialIndexStatus(ctx)
+	if err != nil || status.CatchupPageToken != "next-change" || status.State != "indexing" {
+		t.Fatalf("successful change page cursor = %#v, err = %v", status, err)
+	}
+}
+
+func indexedRemoteEntry(id, name, parent string) RemoteEntry {
+	driveID := domain.DriveFileID(id)
+	return RemoteEntry{
+		Object: domain.Object{
+			ID: domain.ObjectID("drive:" + id), DriveFileID: &driveID,
+			MIMEType: "text/plain", CapabilitiesJSON: "{}",
+		},
+		RemoteName: name, ParentDriveFileID: parent,
 	}
 }
 

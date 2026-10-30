@@ -183,6 +183,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		name    string
 	}{
 		{version: 1, name: "migrations/001_initial.sql"},
+		{version: 2, name: "migrations/002_initial_index.sql"},
 	}
 
 	rows, err := s.db.QueryContext(ctx, `SELECT version, checksum FROM schema_migrations ORDER BY version`)
@@ -355,6 +356,31 @@ func (s *Store) DirectoryEntry(ctx context.Context, parentID domain.ObjectID, di
 	entry.ParentID = domain.ObjectID(parent)
 	entry.ObjectID = domain.ObjectID(object)
 	return entry, nil
+}
+
+func (s *Store) Children(ctx context.Context, parentID domain.ObjectID) ([]domain.DirectoryEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT de.parent_object_id, de.object_id, de.remote_name, de.display_name
+		FROM directory_entries de JOIN objects o ON o.object_id = de.object_id
+		WHERE de.parent_object_id = ? AND o.is_deleted = 0 ORDER BY de.display_name`, string(parentID))
+	if err != nil {
+		return nil, fmt.Errorf("list directory children: %w", err)
+	}
+	defer rows.Close()
+	var entries []domain.DirectoryEntry
+	for rows.Next() {
+		var entry domain.DirectoryEntry
+		var parent, object string
+		if err := rows.Scan(&parent, &object, &entry.RemoteName, &entry.DisplayName); err != nil {
+			return nil, fmt.Errorf("read directory child: %w", err)
+		}
+		entry.ParentID = domain.ObjectID(parent)
+		entry.ObjectID = domain.ObjectID(object)
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read directory children: %w", err)
+	}
+	return entries, nil
 }
 
 const objectSelect = `SELECT object_id, drive_file_id, inode, mime_type, size_bytes,
