@@ -111,7 +111,16 @@
 - Limitations: no live Google Drive account or `/dev/fuse` mount was available. `drivefs --database` and the Qt process are not yet wired to OAuth/indexing/cache construction, so the content path is tested through the injected FUSE reader and fake Drive API.
 - Git commit: `70804ff` (`feat: read Drive files through bounded disk cache`).
 
+## Step 13 — locally durable FUSE writes
+
+- Added an injectable write-enabled indexed FUSE constructor and mount function. `create` assigns a local object ID, inode, directory entry, and MIME type; writable Drive files require indexed `canEdit` capability. Writable descriptors share one private working file, serialize writes and truncation, and return current working size through `getattr`.
+- `write`, `truncate`, `flush`, `fsync`, and `release` now persist immutable content versions and queue operations locally. Repeated calls for an unchanged generation add no operation; later edits to a local file queue as writes after its initial create. Insufficient durable storage maps to `ENOSPC`. Startup recovery removes abandoned mutable working files while preserving successful pending snapshots.
+- Added an explanatory message in the Qt prototype: “Saved locally; waiting to upload to Google Drive.” It describes local durability without claiming that an upload completed. The GUI and FUSE processes still do not share live queue state.
+- Validation: `make check` passed with local loopback available for fake-server tests; `go test -race ./internal/store ./internal/contentcache ./internal/fusefs -count=1`, `make qt-smoke`, and `git diff --check` passed. Tests cover offline create/edit, size truncation, two concurrent writer handles, idempotent repeat flush/fsync, `ENOSPC` mapping, restart recovery, and `SIGKILL` immediately after successful `fsync`.
+- Limitations: `/dev/fuse` is unavailable, so no mounted file-manager test was possible. The `drivefs --database` CLI remains read-only and is not wired to the write-enabled constructor or OAuth/cache setup. The editor temporary-file → rename case will be verified after step 14 implements rename.
+- Git commit: `a6bd98f` (`feat: persist local file writes before acknowledging FUSE`).
+
 ## Next
 
-Step 13: persist FUSE create/write/truncate/flush/fsync locally before acknowledging them.
+Step 14: queue folder creation, rename/move, unlink, and rmdir operations.
 
