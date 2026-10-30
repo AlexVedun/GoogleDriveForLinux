@@ -16,6 +16,8 @@ go build ./cmd/drivefs ./cmd/driveapp
 
 Qt 6 development files and a C++ compiler are required once the Qt/MIQT application is added. FUSE device access is required to run mount integration tests.
 
+The current `drivefs` command is a **local FUSE loopback spike** for testing the FUSE protocol; it does not connect to Google Drive. With an existing empty mount directory and a separate disposable source directory, run `./bin/drivefs --source SOURCE_DIR --mountpoint MOUNT_DIR`. Run `./scripts/fuse-smoke.sh` for the destructive-operation smoke test; it creates and removes files only in its own temporary directory.
+
 ## Data safety contract
 
 Once implemented, a successful local `fsync` will mean that file contents and the queued change are durably stored locally. It will not mean that the change has already reached Google Drive. Pending data must survive restarts and must not be evicted from the cache.

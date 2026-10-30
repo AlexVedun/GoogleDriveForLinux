@@ -14,7 +14,16 @@
 - Validation: documentation cross-check against the product and execution plans; no code changed in this step.
 - Git commit: pending.
 
+## Step 3 — Go FUSE loopback spike
+
+- Added a disposable local loopback mount using `go-fuse/v2` v2.12.0, with path checks that require a separate empty mount directory and reject nested source/mount paths.
+- Added validation tests and `scripts/fuse-smoke.sh` for read, write + `sync -f`, rename, mkdir/rmdir, delete, and unmount.
+- Validation: `go test ./...`, `go vet ./...`, `make build`, `bash -n scripts/fuse-smoke.sh`, and the binary `--version` passed.
+- Live FUSE mount check: not run because `/dev/fuse` is not visible in this execution environment. The smoke script returns its documented skip code 77. Run it in the host session with FUSE access.
+- This is an explicitly local-only protocol spike, not a Drive filesystem or durable queue.
+- Git commit: pending.
+
 ## Next
 
-Step 3: prototype FUSE operations against a temporary local store.
+Step 4: verify Qt 6 Widgets, tray support, GUI thread dispatch, and AppImage packaging.
 
