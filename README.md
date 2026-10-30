@@ -4,6 +4,8 @@ Go and Qt 6 desktop client that mounts a user's Google Drive **My Drive** folder
 
 The product is at the initial project setup stage. FUSE mounting, Google authentication, synchronization, offline writes, and the Qt interface are not implemented yet. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
 
+The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md); unresolved technical choices are tracked in [docs/decisions.md](docs/decisions.md).
+
 ## Build and check
 
 ```sh
