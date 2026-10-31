@@ -150,6 +150,24 @@ func TestSettingsPersistAndRejectUnsafeCacheLimit(t *testing.T) {
 	if settings.CacheLimitBytes != 512<<20 {
 		t.Fatalf("saved cache limit = %d", settings.CacheLimitBytes)
 	}
+	clientID := "  desktop-client.apps.googleusercontent.com  "
+	result, _, err = controller.Handle(context.Background(), request(ipc.CommandSettingsSet,
+		settingsPayload{CacheLimitBytes: 512 << 20, OAuthClientID: &clientID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.(Settings).OAuthClientID; got != "desktop-client.apps.googleusercontent.com" {
+		t.Fatalf("saved OAuth client ID = %q", got)
+	}
+	loaded, err := LoadSettings(settingsPath, "")
+	if err != nil || loaded.OAuthClientID != "desktop-client.apps.googleusercontent.com" {
+		t.Fatalf("persisted OAuth client ID = %q, error = %v", loaded.OAuthClientID, err)
+	}
+	result, _, err = controller.Handle(context.Background(), request(ipc.CommandSettingsSet,
+		settingsPayload{CacheLimitBytes: 256 << 20}))
+	if err != nil || result.(Settings).OAuthClientID != loaded.OAuthClientID {
+		t.Fatalf("cache-only update lost OAuth client ID: result = %v, error = %v", result, err)
+	}
 	if _, _, err := controller.Handle(context.Background(), request(ipc.CommandSettingsSet,
 		settingsPayload{CacheLimitBytes: 1})); err == nil {
 		t.Fatal("unsafe cache limit was accepted")

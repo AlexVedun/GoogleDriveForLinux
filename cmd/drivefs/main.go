@@ -138,37 +138,31 @@ func runIPCServer(socketPath string) error {
 	})
 	controller.SetPaths(database, settingsPath)
 	controller.SetSyncHooks(runtimeManager.status, runtimeManager.notifyPinsChanged, runtimeManager.setCacheLimit)
-	clientID := os.Getenv("GOOGLE_OAUTH_CLIENT_ID")
-	if clientID != "" {
-		secrets, err := secretstore.NewSystemStore("google-drive-linux")
-		if err != nil {
-			log.Printf("OAuth credential store unavailable: %v", err)
-			controller.SetAccountActions(&drivecontrol.AccountActions{UnavailableMessage: "The system Secret Service is unavailable"})
-		} else if oauth, err := auth.NewService(auth.Config{ClientID: clientID, Secrets: secrets}); err != nil {
-			log.Printf("OAuth configuration unavailable: %v", err)
-			controller.SetAccountActions(&drivecontrol.AccountActions{UnavailableMessage: "Google OAuth configuration is invalid"})
-		} else {
-			runtimeManager.oauth = oauth
-			controller.SetAccountActions(&drivecontrol.AccountActions{
-				IsAuthenticated: oauth.IsAuthenticated,
-				SignIn: func(ctx context.Context) error {
-					_, err := oauth.Authorize(ctx)
-					if err != nil {
-						return err
-					}
-					return runtimeManager.start(ctx)
-				},
-				SignOut: func(ctx context.Context) error {
-					if err := runtimeManager.stop(); err != nil {
-						return err
-					}
-					if err := oauth.Revoke(ctx); err != nil {
-						return errors.Join(err, runtimeManager.start(ctx))
-					}
-					return nil
-				},
-			})
-			if authenticated, authErr := oauth.IsAuthenticated(context.Background()); authErr != nil {
+	secrets, secretsErr := secretstore.NewSystemStore("google-drive-linux")
+	if secretsErr != nil {
+		log.Printf("OAuth credential store unavailable: %v", secretsErr)
+		controller.SetAccountActions(&drivecontrol.AccountActions{UnavailableMessage: "The system Secret Service is unavailable"})
+	} else {
+		var oauthMu sync.Mutex
+		var oauth *auth.Service
+		loadOAuth := func() (*auth.Service, error) {
+			current, err := drivecontrol.LoadSettings(settingsPath, database)
+			if err != nil {
+				return nil, err
+			}
+			clientID := current.OAuthClientID
+			if clientID == "" {
+				clientID = os.Getenv("GOOGLE_OAUTH_CLIENT_ID")
+			}
+			if clientID == "" {
+				return nil, errors.New("enter the Google OAuth client ID in Settings before signing in")
+			}
+			return auth.NewService(auth.Config{ClientID: clientID, Secrets: secrets})
+		}
+		if initial, err := loadOAuth(); err == nil {
+			oauth = initial
+			runtimeManager.setOAuth(initial)
+			if authenticated, authErr := initial.IsAuthenticated(context.Background()); authErr != nil {
 				log.Printf("stored Google credential unavailable: %v", authErr)
 			} else if authenticated {
 				if err := runtimeManager.start(context.Background()); err != nil {
@@ -176,8 +170,49 @@ func runIPCServer(socketPath string) error {
 				}
 			}
 		}
-	} else {
-		controller.SetAccountActions(nil)
+		controller.SetAccountActions(&drivecontrol.AccountActions{
+			IsAuthenticated: func(ctx context.Context) (bool, error) {
+				oauthMu.Lock()
+				current := oauth
+				oauthMu.Unlock()
+				if current == nil {
+					return false, nil
+				}
+				return current.IsAuthenticated(ctx)
+			},
+			SignIn: func(ctx context.Context) error {
+				if runtimeManager.current() != nil {
+					return nil
+				}
+				current, err := loadOAuth()
+				if err != nil {
+					return err
+				}
+				oauthMu.Lock()
+				oauth = current
+				runtimeManager.setOAuth(current)
+				oauthMu.Unlock()
+				if _, err := current.Authorize(ctx); err != nil {
+					return err
+				}
+				return runtimeManager.start(ctx)
+			},
+			SignOut: func(ctx context.Context) error {
+				oauthMu.Lock()
+				current := oauth
+				oauthMu.Unlock()
+				if current == nil {
+					return errors.New("Google OAuth is not configured")
+				}
+				if err := runtimeManager.stop(); err != nil {
+					return err
+				}
+				if err := current.Revoke(ctx); err != nil {
+					return errors.Join(err, runtimeManager.start(ctx))
+				}
+				return nil
+			},
+		})
 	}
 	server, err := ipc.Listen(filepath.Clean(socketPath), controller)
 	if err != nil {
@@ -207,6 +242,12 @@ type syncRuntimeManager struct {
 
 func newSyncRuntimeManager(database string, cacheLimit int64) *syncRuntimeManager {
 	return &syncRuntimeManager{database: database, cacheLimit: cacheLimit}
+}
+
+func (m *syncRuntimeManager) setOAuth(oauth *auth.Service) {
+	m.mu.Lock()
+	m.oauth = oauth
+	m.mu.Unlock()
 }
 
 func (m *syncRuntimeManager) start(ctx context.Context) error {

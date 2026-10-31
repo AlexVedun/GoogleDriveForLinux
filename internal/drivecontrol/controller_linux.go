@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,7 +150,8 @@ type conflictResolveRequest struct {
 }
 
 type settingsPayload struct {
-	CacheLimitBytes int64 `json:"cache_limit_bytes"`
+	CacheLimitBytes int64   `json:"cache_limit_bytes"`
+	OAuthClientID   *string `json:"oauth_client_id,omitempty"`
 }
 
 type QueueItem struct {
@@ -180,7 +182,7 @@ func (c *Controller) Handle(ctx context.Context, request ipc.Request) (any, bool
 		if err := decodePayload(request.Payload, &input); err != nil {
 			return nil, false, err
 		}
-		settings, err := c.setCacheLimit(input.CacheLimitBytes)
+		settings, err := c.setSettings(input)
 		return settings, false, err
 	case ipc.CommandMount:
 		var input MountRequest
@@ -529,7 +531,7 @@ func (c *Controller) readSettingsLocked() (Settings, error) {
 	return readSettings(c.settingsPath, fallback)
 }
 
-func (c *Controller) setCacheLimit(limit int64) (Settings, error) {
+func (c *Controller) setSettings(input settingsPayload) (Settings, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	settings, err := c.readSettingsLocked()
@@ -537,7 +539,10 @@ func (c *Controller) setCacheLimit(limit int64) (Settings, error) {
 		return Settings{}, err
 	}
 	previous := settings.CacheLimitBytes
-	settings.CacheLimitBytes = limit
+	settings.CacheLimitBytes = input.CacheLimitBytes
+	if input.OAuthClientID != nil {
+		settings.OAuthClientID = strings.TrimSpace(*input.OAuthClientID)
+	}
 	if err := validateSettings(settings); err != nil {
 		return Settings{}, err
 	}
@@ -545,7 +550,7 @@ func (c *Controller) setCacheLimit(limit int64) (Settings, error) {
 		return Settings{}, errors.New("settings path is not configured")
 	}
 	if c.cacheLimit != nil {
-		if err := c.cacheLimit(limit); err != nil {
+		if err := c.cacheLimit(input.CacheLimitBytes); err != nil {
 			return Settings{}, fmt.Errorf("apply content cache limit: %w", err)
 		}
 	}

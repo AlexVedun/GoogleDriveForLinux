@@ -19,6 +19,7 @@ const (
 
 type Settings struct {
 	CacheLimitBytes int64  `json:"cache_limit_bytes"`
+	OAuthClientID   string `json:"oauth_client_id,omitempty"`
 	Database        string `json:"database,omitempty"`
 	Mountpoint      string `json:"mountpoint,omitempty"`
 }
@@ -160,6 +161,9 @@ func verifySettingsDirectory(path string) error {
 func validateSettings(settings Settings) error {
 	if settings.CacheLimitBytes < MinCacheLimitBytes || settings.CacheLimitBytes > MaxCacheLimitBytes {
 		return fmt.Errorf("cache limit must be between %d and %d bytes", MinCacheLimitBytes, MaxCacheLimitBytes)
+	}
+	if len(settings.OAuthClientID) > 512 {
+		return errors.New("OAuth client ID is too long")
 	}
 	return nil
 }

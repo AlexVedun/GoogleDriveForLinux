@@ -32,17 +32,16 @@ make qt-smoke
 make appimage
 ```
 
-To launch a built AppImage, make it executable and provide the OAuth desktop
-client ID in the environment:
+To launch a built AppImage, make it executable:
 
 ```sh
 chmod +x Google_Drive_for_Linux-x86_64.AppImage
-GOOGLE_OAUTH_CLIENT_ID='your-desktop-client-id.apps.googleusercontent.com' \
-  ./Google_Drive_for_Linux-x86_64.AppImage
+./Google_Drive_for_Linux-x86_64.AppImage
 ```
 
 Create a Google Cloud OAuth client of type **Desktop app**, enable the Drive
-API, and configure a test user before signing in. The client ID is not a
+API, and configure a test user. Enter its client ID in the application's
+**Settings** tab and click **Save settings** before signing in. The client ID is not a
 secret; OAuth tokens are stored in Secret Service under service
 `google-drive-linux`, key `primary`. The application does not save tokens to
 files or SQLite. See [OAuth setup](oauth.md).

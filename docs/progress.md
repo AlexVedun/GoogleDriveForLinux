@@ -200,6 +200,12 @@
 - Validation: rebuilt with `make appimage`; ordinary AppImage `--smoke` passed under `QT_QPA_PLATFORM=wayland`, `xcb`, and `offscreen` in the current desktop session. `--appimage-extract` passed; extracted `libffi.so.8` and `libqwayland.so` matched the original system files; bundled `drivefs --version`, shell syntax, and `git diff --check` passed. SHA-256: `ea3a11a9a0809044cda1760c3498de2d2d1842bd63dea2893e857b08f0d45bda`.
 - The smoke test constructs and closes Qt without OAuth, a mounted FUSE filesystem, Secret Service, tray interaction, or a full GNOME/KDE workflow. This Fedora 44 build has not been checked against an older glibc baseline.
 
+## OAuth client ID in Qt settings
+
+- The Settings tab now accepts a Google OAuth Desktop app client ID and saves it to the private per-user `settings.json`. `drivefs` reads the saved ID on startup and again when sign-in begins, so the user can save it and sign in without restarting. `GOOGLE_OAUTH_CLIENT_ID` remains a fallback when no ID is saved; OAuth tokens stay in Secret Service.
+- Validation: `go test ./... -count=1`, `go vet ./...`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. The current AppImage SHA-256 is `53f754be318220d95c7e7684181df46ebb71c9b7772ed0dc883b02e2ef24be69`.
+- Real Google authorization and Secret Service interaction were not tested with an account.
+
 ## Completion status
 
 Local implementation steps 1–21 and their available checks are complete. The
