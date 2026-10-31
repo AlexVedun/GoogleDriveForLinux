@@ -20,7 +20,9 @@ gates have not been completed.
   commands and limits recorded for each step.
 - `make appimage` produced an x86_64 AppImage containing `driveapp`,
   `drivefs`, Qt platform plugins, desktop metadata, and license notices. The
-  image extracts with `--appimage-extract`; extracted offscreen Qt launch,
+  image extracts with `--appimage-extract`; ordinary AppImage Qt smoke launches
+  pass in this desktop session with Wayland, X11 (`xcb`), and offscreen after
+  fixing linuxdeploy's ELF initialization corruption. Extracted offscreen Qt launch,
   bundled `drivefs --version`, and a per-user service start/quit smoke test
   passed. The smoke also confirmed the app reports Secret Service failure
   without falling back to a token file.
@@ -40,8 +42,8 @@ gates have not been completed.
 | 10% free-space floor | Reservation and rejection behavior are tested with controlled filesystem capacity. **Local tests passed** |
 | Thousands of objects and duplicate names | Large-index and stable-name behaviors have local tests; no live large Drive was used. **Local tests passed** |
 | HTTP 401, 403, 404, 429, and 5xx | Fake-server tests verify error classes, safe retries, and non-repetition of ambiguous mutations. **Local tests passed** |
-| GNOME and KDE, X11 and Wayland | No visible desktop/compositor session was available. **Not tested** |
-| Ordinary and extracted AppImage with OAuth, FUSE, Secret Service, and clean exit | Extraction and headless launch passed. Ordinary launch failed because this host has no usable `fusermount` or `/dev/fuse`. Secret Service absence and IPC shutdown were checked without real credentials. Live OAuth, FUSE mount, tray, and desktop exit were not tested. **Partial** |
+| GNOME and KDE, X11 and Wayland | Qt startup smoke passes in the current desktop session with Wayland and X11 (`xcb`). Full GUI and tray workflows across GNOME and KDE remain untested. **Partial** |
+| Ordinary and extracted AppImage with OAuth, FUSE, Secret Service, and clean exit | Ordinary AppImage Qt startup smoke and extraction pass. Secret Service absence and IPC shutdown were checked without real credentials. Live OAuth, FUSE mount, tray, and desktop exit were not tested. **Partial** |
 
 ## Remaining public-release gates
 

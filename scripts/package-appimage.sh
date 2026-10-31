@@ -32,6 +32,7 @@ cat > "$app_dir/AppRun" <<'APP_RUN'
 HERE="$(dirname "$(readlink -f "$0")")"
 export PATH="$HERE/usr/bin:$PATH"
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="$HERE/usr/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$HERE/usr/plugins/platforms"
 exec "$HERE/usr/bin/driveapp" "$@"
 APP_RUN
@@ -49,9 +50,32 @@ export NO_STRIP=1 # bundled linuxdeploy strip is too old for Fedora 44 RELR ELF 
     --icon-file "$app_dir/usr/share/icons/hicolor/scalable/apps/google-drive-linux.svg" \
     --plugin qt
 
-# linuxdeploy-plugin-qt writes a qt.conf that crashes this MIQT binary when
-# used from an extracted AppImage. AppRun sets the bundle paths explicitly.
-rm -f "$app_dir/usr/bin/qt.conf"
+# linuxdeploy rewrites ELF runpaths, and its patched Fedora 44 libraries can
+# retain a DT_INIT address that no longer points at the relocated .init code.
+# AppRun already resolves shared libraries through LD_LIBRARY_PATH, so restore
+# their original bytes after linuxdeploy has finished collecting dependencies.
+for bundled in "$app_dir"/usr/lib/*; do
+    [[ -f "$bundled" ]] || continue
+    original="/usr/lib64/${bundled##*/}"
+    [[ -f "$original" ]] || { echo "Missing original library: $original" >&2; exit 1; }
+    cp -L -- "$original" "$bundled"
+done
+while IFS= read -r -d '' bundled; do
+    relative="${bundled#"$app_dir/usr/plugins/"}"
+    original="/usr/lib64/qt6/plugins/$relative"
+    [[ -f "$original" ]] || { echo "Missing original Qt plugin: $original" >&2; exit 1; }
+    cp -L -- "$original" "$bundled"
+done < <(find "$app_dir/usr/plugins" -type f -name '*.so' -print0)
+install -m 0755 bin/driveapp "$app_dir/usr/bin/driveapp"
+install -m 0755 bin/drivefs "$app_dir/usr/bin/drivefs"
+
+# Keep Qt's plugin lookup inside the AppImage. The relative paths are resolved
+# from usr/bin, where driveapp and this qt.conf are installed.
+cat > "$app_dir/usr/bin/qt.conf" <<'QT_CONF'
+[Paths]
+Prefix=..
+Plugins=plugins
+QT_CONF
 "$root_dir/scripts/bundle-appimage-rpm-licenses.sh" "$app_dir"
 "$tools_dir/linuxdeploy-plugin-appimage-x86_64.AppImage" --appimage-extract-and-run \
     --appdir "$app_dir"

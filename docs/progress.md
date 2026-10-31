@@ -193,6 +193,13 @@
 - Git commit: `b8ebf31` (`build: inventory bundled AppImage licenses`).
 - Git commit: `890fcf6` (`docs: record release validation and operating guide`).
 
+## AppImage Qt startup crash follow-up
+
+- Reproduced the reported `SIGSEGV` in `QApplication_new` with the ordinary AppImage on a live Wayland session. A system-built `driveapp` and the extracted bundle with offscreen Qt passed, isolating the failure to the packaged Qt dependencies.
+- In the bundled `libffi.so.8`, linuxdeploy's runpath rewrite moved the ELF `.init` section without updating `DT_INIT`; the dynamic loader jumped to the old address during Qt platform-plugin loading. The packager now restores the original system libraries and Qt plugins after linuxdeploy, restores the two Go executables, and supplies `qt.conf` plus explicit Qt plugin paths.
+- Validation: rebuilt with `make appimage`; ordinary AppImage `--smoke` passed under `QT_QPA_PLATFORM=wayland`, `xcb`, and `offscreen` in the current desktop session. `--appimage-extract` passed; extracted `libffi.so.8` and `libqwayland.so` matched the original system files; bundled `drivefs --version`, shell syntax, and `git diff --check` passed. SHA-256: `ea3a11a9a0809044cda1760c3498de2d2d1842bd63dea2893e857b08f0d45bda`.
+- The smoke test constructs and closes Qt without OAuth, a mounted FUSE filesystem, Secret Service, tray interaction, or a full GNOME/KDE workflow. This Fedora 44 build has not been checked against an older glibc baseline.
+
 ## Completion status
 
 Local implementation steps 1–21 and their available checks are complete. The
