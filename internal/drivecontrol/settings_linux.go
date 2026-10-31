@@ -18,10 +18,11 @@ const (
 )
 
 type Settings struct {
-	CacheLimitBytes int64  `json:"cache_limit_bytes"`
-	OAuthClientID   string `json:"oauth_client_id,omitempty"`
-	Database        string `json:"database,omitempty"`
-	Mountpoint      string `json:"mountpoint,omitempty"`
+	CacheLimitBytes   int64  `json:"cache_limit_bytes"`
+	OAuthClientID     string `json:"oauth_client_id,omitempty"`
+	OAuthClientSecret string `json:"oauth_client_secret,omitempty"`
+	Database          string `json:"database,omitempty"`
+	Mountpoint        string `json:"mountpoint,omitempty"`
 }
 
 type SettingsUpdate struct {
@@ -164,6 +165,9 @@ func validateSettings(settings Settings) error {
 	}
 	if len(settings.OAuthClientID) > 512 {
 		return errors.New("OAuth client ID is too long")
+	}
+	if len(settings.OAuthClientSecret) > 512 {
+		return errors.New("OAuth client secret is too long")
 	}
 	return nil
 }

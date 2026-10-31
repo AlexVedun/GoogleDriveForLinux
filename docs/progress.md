@@ -206,6 +206,13 @@
 - Validation: `go test ./... -count=1`, `go vet ./...`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. The current AppImage SHA-256 is `53f754be318220d95c7e7684181df46ebb71c9b7772ed0dc883b02e2ef24be69`.
 - Real Google authorization and Secret Service interaction were not tested with an account.
 
+## OAuth token-exchange troubleshooting
+
+- The Google callback can succeed while exchanging its authorization code for tokens fails. Token-exchange errors now show a safe OAuth category or HTTP status in the Qt account status without exposing Google's response body, authorization code, or tokens.
+- Added an optional Desktop app OAuth client secret setting; the service sends it during code exchange when provided. The saved settings file remains private (`0600`). Google's desktop-client guidance marks this field optional, so its absence is not assumed to be the cause of every exchange failure.
+- Validation: `go test ./... -count=1`, `go vet ./...`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. Current AppImage SHA-256: `138fc06a9abb1749f0ba0a95db4b1c5c126409f3031d0c8577c058ea14a5c87b`.
+- A live Google token exchange with the user's client was not performed. After updating the AppImage, the existing background `drivefs` service must be stopped with **Quit and unmount** before the new binary is launched.
+
 ## Completion status
 
 Local implementation steps 1–21 and their available checks are complete. The

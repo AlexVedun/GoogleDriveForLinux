@@ -157,7 +157,7 @@ func runIPCServer(socketPath string) error {
 			if clientID == "" {
 				return nil, errors.New("enter the Google OAuth client ID in Settings before signing in")
 			}
-			return auth.NewService(auth.Config{ClientID: clientID, Secrets: secrets})
+			return auth.NewService(auth.Config{ClientID: clientID, ClientSecret: current.OAuthClientSecret, Secrets: secrets})
 		}
 		if initial, err := loadOAuth(); err == nil {
 			oauth = initial

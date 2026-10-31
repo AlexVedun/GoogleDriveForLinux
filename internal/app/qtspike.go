@@ -238,6 +238,10 @@ func RunQtApp(smoke bool, socketPath string) int {
 	clientIDInput := qt.NewQLineEdit2()
 	clientIDInput.SetPlaceholderText("123456789-abc.apps.googleusercontent.com")
 	settingsLayout.AddWidget(clientIDInput.QWidget)
+	settingsLayout.AddWidget(qt.NewQLabel3("OAuth client secret (optional)").QWidget)
+	clientSecretInput := qt.NewQLineEdit2()
+	clientSecretInput.SetEchoMode(qt.QLineEdit__Password)
+	settingsLayout.AddWidget(clientSecretInput.QWidget)
 	clientIDHint := qt.NewQLabel3("Create a Desktop app OAuth client in Google Cloud. Save its client ID here, then use Sign in with Google. The ID is saved in private application settings; access tokens remain in the system keyring.")
 	clientIDHint.SetWordWrap(true)
 	settingsLayout.AddWidget(clientIDHint.QWidget)
@@ -249,7 +253,7 @@ func RunQtApp(smoke bool, socketPath string) int {
 	settingsLayout.AddWidget(cacheLimit.QWidget)
 	saveSettings := qt.NewQPushButton3("Save settings")
 	saveSettings.OnClicked(func() {
-		callAsync(ipc.CommandSettingsSet, map[string]any{"cache_limit_bytes": int64(cacheLimit.Value()) << 20, "oauth_client_id": strings.TrimSpace(clientIDInput.Text())}, "Save settings")
+		callAsync(ipc.CommandSettingsSet, map[string]any{"cache_limit_bytes": int64(cacheLimit.Value()) << 20, "oauth_client_id": strings.TrimSpace(clientIDInput.Text()), "oauth_client_secret": strings.TrimSpace(clientSecretInput.Text())}, "Save settings")
 	})
 	settingsLayout.AddWidget(saveSettings.QWidget)
 	settingsHint := qt.NewQLabel3("The limit applies to evictable downloads when signed in. Pending edits and pinned files are protected and may exceed it; the 10% free-space floor is enforced separately.")
@@ -362,6 +366,7 @@ func RunQtApp(smoke bool, socketPath string) int {
 		if !settingsLoaded && state.Settings.CacheLimitBytes > 0 {
 			cacheLimit.SetValue(int(state.Settings.CacheLimitBytes >> 20))
 			clientIDInput.SetText(state.Settings.OAuthClientID)
+			clientSecretInput.SetText(state.Settings.OAuthClientSecret)
 			settingsLoaded = true
 		}
 		queueView.SetPlainText(renderQueue(state.Queue, state.Errors, state.Status.SyncError))

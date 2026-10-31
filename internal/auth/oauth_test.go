@@ -94,6 +94,30 @@ func TestAuthorizeUsesPKCEAndRejectsWrongState(t *testing.T) {
 	}
 }
 
+func TestTokenExchangeFailureShowsSafeReason(t *testing.T) {
+	for _, test := range []struct {
+		code string
+		want string
+	}{
+		{"invalid_client", "OAuth client"},
+		{"invalid_grant", "rejected the code"},
+		{"redirect_uri_mismatch", "Desktop app"},
+		{"unexpected-token-value", "HTTP 400"},
+	} {
+		err := tokenExchangeFailure(&oauth2.RetrieveError{
+			Response:  &http.Response{StatusCode: http.StatusBadRequest},
+			ErrorCode: test.code, ErrorDescription: testAccessToken,
+			Body: []byte(testRefreshToken),
+		})
+		if !errors.Is(err, ErrTokenExchange) || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("code %q: error = %v", test.code, err)
+		}
+		if strings.Contains(err.Error(), testAccessToken) || strings.Contains(err.Error(), testRefreshToken) || strings.Contains(err.Error(), "unexpected-token-value") {
+			t.Errorf("code %q leaked provider data: %v", test.code, err)
+		}
+	}
+}
+
 func TestAuthorizeTimeoutAndDenial(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		provider := newFakeOAuthProvider(t)

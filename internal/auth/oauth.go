@@ -197,7 +197,7 @@ func (s *Service) Authorize(ctx context.Context) (*oauth2.Token, error) {
 	exchangeContext = context.WithValue(exchangeContext, oauth2.HTTPClient, s.httpClient)
 	token, err := oauthConfig.Exchange(exchangeContext, result.code, oauth2.VerifierOption(verifier))
 	if err != nil || token == nil || token.AccessToken == "" {
-		return nil, safeFailure(ErrTokenExchange, err)
+		return nil, tokenExchangeFailure(err)
 	}
 	if err := s.saveToken(exchangeContext, token); err != nil {
 		return nil, err
@@ -432,4 +432,29 @@ func (e *safeError) Is(target error) bool {
 
 func safeFailure(marker, _ error) error {
 	return &safeError{marker: marker}
+}
+
+// Keep provider response bodies and descriptions out of the UI: they can
+// contain credentials. OAuth error codes are only shown from this allowlist.
+func tokenExchangeFailure(err error) error {
+	var retrieve *oauth2.RetrieveError
+	if errors.As(err, &retrieve) {
+		switch retrieve.ErrorCode {
+		case "invalid_client":
+			return fmt.Errorf("%w: Google rejected the OAuth client; check the Desktop app client ID and its client secret", ErrTokenExchange)
+		case "invalid_grant":
+			return fmt.Errorf("%w: Google rejected the code; retry sign-in and check the OAuth client configuration", ErrTokenExchange)
+		case "redirect_uri_mismatch":
+			return fmt.Errorf("%w: Google rejected the redirect URI; use a Desktop app OAuth client", ErrTokenExchange)
+		case "invalid_request", "unauthorized_client":
+			return fmt.Errorf("%w: Google returned %s; check the OAuth client configuration", ErrTokenExchange, retrieve.ErrorCode)
+		}
+		if retrieve.Response != nil {
+			return fmt.Errorf("%w: Google token endpoint returned HTTP %d", ErrTokenExchange, retrieve.Response.StatusCode)
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: timed out contacting Google", ErrTokenExchange)
+	}
+	return ErrTokenExchange
 }

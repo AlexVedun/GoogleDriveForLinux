@@ -150,8 +150,9 @@ type conflictResolveRequest struct {
 }
 
 type settingsPayload struct {
-	CacheLimitBytes int64   `json:"cache_limit_bytes"`
-	OAuthClientID   *string `json:"oauth_client_id,omitempty"`
+	CacheLimitBytes   int64   `json:"cache_limit_bytes"`
+	OAuthClientID     *string `json:"oauth_client_id,omitempty"`
+	OAuthClientSecret *string `json:"oauth_client_secret,omitempty"`
 }
 
 type QueueItem struct {
@@ -542,6 +543,9 @@ func (c *Controller) setSettings(input settingsPayload) (Settings, error) {
 	settings.CacheLimitBytes = input.CacheLimitBytes
 	if input.OAuthClientID != nil {
 		settings.OAuthClientID = strings.TrimSpace(*input.OAuthClientID)
+	}
+	if input.OAuthClientSecret != nil {
+		settings.OAuthClientSecret = strings.TrimSpace(*input.OAuthClientSecret)
 	}
 	if err := validateSettings(settings); err != nil {
 		return Settings{}, err

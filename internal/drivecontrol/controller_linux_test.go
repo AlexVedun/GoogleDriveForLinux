@@ -151,17 +151,21 @@ func TestSettingsPersistAndRejectUnsafeCacheLimit(t *testing.T) {
 		t.Fatalf("saved cache limit = %d", settings.CacheLimitBytes)
 	}
 	clientID := "  desktop-client.apps.googleusercontent.com  "
+	clientSecret := "  desktop-client-secret  "
 	result, _, err = controller.Handle(context.Background(), request(ipc.CommandSettingsSet,
-		settingsPayload{CacheLimitBytes: 512 << 20, OAuthClientID: &clientID}))
+		settingsPayload{CacheLimitBytes: 512 << 20, OAuthClientID: &clientID, OAuthClientSecret: &clientSecret}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := result.(Settings).OAuthClientID; got != "desktop-client.apps.googleusercontent.com" {
 		t.Fatalf("saved OAuth client ID = %q", got)
 	}
+	if got := result.(Settings).OAuthClientSecret; got != "desktop-client-secret" {
+		t.Fatalf("saved OAuth client secret = %q", got)
+	}
 	loaded, err := LoadSettings(settingsPath, "")
-	if err != nil || loaded.OAuthClientID != "desktop-client.apps.googleusercontent.com" {
-		t.Fatalf("persisted OAuth client ID = %q, error = %v", loaded.OAuthClientID, err)
+	if err != nil || loaded.OAuthClientID != "desktop-client.apps.googleusercontent.com" || loaded.OAuthClientSecret != "desktop-client-secret" {
+		t.Fatalf("persisted OAuth client credentials = %q / %q, error = %v", loaded.OAuthClientID, loaded.OAuthClientSecret, err)
 	}
 	result, _, err = controller.Handle(context.Background(), request(ipc.CommandSettingsSet,
 		settingsPayload{CacheLimitBytes: 256 << 20}))
