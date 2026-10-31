@@ -220,6 +220,13 @@
 - Validation: `go test ./... -count=1`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. Current AppImage SHA-256: `df63826b342a01fbb45249e826973920f8fc8d9011d915364f53036459d2f900`.
 - A live Google exchange with the user's OAuth client has not been repeated yet. Stop the old background service with **Quit and unmount** before trying this AppImage.
 
+## SQLite polling lock and automatic mount
+
+- After a live Google sign-in and successful FUSE mount, the Drive changes poll reported `persist Drive changes poll cursor: database is locked`. The cursor transaction read before writing while other sync workers could write. SQLite transactions now use `BEGIN IMMEDIATE` through the driver `_txlock=immediate` option, so a write transaction reserves the writer before its first read. A two-connection test checks that the competing writer waits and resumes after commit.
+- The Qt app now mounts a saved directory once per launch when the account is signed in, the synchronization runtime exists, and the index is ready. It leaves manual unmount in effect for the rest of that app run; failed automatic attempts display their error through the existing action message.
+- Validation: `go test ./... -count=1`, `go vet ./...`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. Current AppImage SHA-256: `48f242aade2f9ef60777a2ba34cc8f2614b77f85a654728171d8e7da76931b59`.
+- The user's mounted session was left running. The updated AppImage still needs a live Drive poll and automatic FUSE mount check after the old service is stopped and the new binary starts.
+
 ## Completion status
 
 Local implementation steps 1–21 and their available checks are complete. The

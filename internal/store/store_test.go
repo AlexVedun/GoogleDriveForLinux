@@ -14,6 +14,53 @@ import (
 	"google-drive-linux/internal/domain"
 )
 
+func TestWriteTransactionReservesWriterBeforeReading(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	tx, err := first.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT index_state FROM sync_state WHERE singleton = 1`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	otherDone := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := second.db.ExecContext(ctx, `UPDATE sync_state SET updated_at = ? WHERE singleton = 1`, formatTime(time.Now()))
+		otherDone <- err
+	}()
+	<-started
+	select {
+	case err := <-otherDone:
+		t.Fatalf("concurrent writer finished before transaction commit: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sync_state SET updated_at = ? WHERE singleton = 1`, formatTime(time.Now())); err != nil {
+		t.Fatalf("read transaction could not write after another writer waited: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-otherDone; err != nil {
+		t.Fatalf("concurrent writer did not resume: %v", err)
+	}
+}
+
 func TestSchemaMigrationAndObjectIdentitySurviveReopen(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "state", "metadata.db")

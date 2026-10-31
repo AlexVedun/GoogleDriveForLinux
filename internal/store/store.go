@@ -103,6 +103,10 @@ func dataSourceName(path string) string {
 	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
 	query := url.Values{}
 	query.Set("_busy_timeout", "5000")
+	// Reserve the single SQLite writer before reading in a write transaction.
+	// A deferred read transaction cannot be upgraded after another WAL writer
+	// commits, even with busy_timeout configured (SQLITE_BUSY_SNAPSHOT).
+	query.Set("_txlock", "immediate")
 	query.Set("_foreign_keys", "on")
 	query.Set("_journal_mode", "WAL")
 	query.Set("_synchronous", "FULL")

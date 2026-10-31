@@ -47,7 +47,11 @@ secret; OAuth tokens are stored in Secret Service under service
 files or SQLite. See [OAuth setup](oauth.md).
 
 In the window, sign in, select an existing empty directory as the mountpoint,
-and choose **Mount**. Closing the window hides it when a system tray is
+and choose **Mount**. On later launches, the app mounts that saved directory
+automatically once the account is signed in, synchronization is running, and
+the Drive index is ready. If automatic mounting fails, the message appears in
+the window and the manual **Mount Drive** button remains available. Closing
+the window hides it when a system tray is
 available. Without a tray, closing the window requests service shutdown and
 unmount. **Quit and unmount** explicitly stops the service before the GUI
 exits.

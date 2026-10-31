@@ -333,6 +333,7 @@ func RunQtApp(smoke bool, socketPath string) int {
 	}
 	updated := false
 	settingsLoaded := false
+	autoMountAttempted := false
 	poll := qt.NewQTimer()
 	poll.SetInterval(150)
 	poll.OnTimeout(func() {
@@ -346,6 +347,15 @@ func RunQtApp(smoke bool, socketPath string) int {
 			messageLabel.SetText(message)
 		}
 		state := snapshot.Load().(appSnapshot)
+		if !autoMountAttempted && state.Status.Mounted {
+			autoMountAttempted = true
+		}
+		if !autoMountAttempted && shouldAutoMount(state.Status, state.Settings) {
+			autoMountAttempted = true
+			callAsync(ipc.CommandMount, drivecontrol.MountRequest{
+				Database: state.Status.Database, Mountpoint: state.Settings.Mountpoint,
+			}, "Auto mount")
+		}
 		if state.Status.AccountState != "" {
 			accountText := "Google account: " + state.Status.AccountState
 			if state.Status.AccountError != "" {
@@ -404,6 +414,12 @@ func RunQtApp(smoke bool, socketPath string) int {
 		return 1
 	}
 	return 0
+}
+
+func shouldAutoMount(status drivecontrol.Status, settings drivecontrol.Settings) bool {
+	return !status.Mounted && status.AccountState == "signed-in" &&
+		status.NetworkState != "not-connected" && status.IndexState == "ready" &&
+		status.Database != "" && settings.Mountpoint != ""
 }
 
 func pollDriveFS(socketPath string, getClient func() *ipc.Client, setClient func(*ipc.Client), destination *atomic.Value, statusText *atomic.Value) {
