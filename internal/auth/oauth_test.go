@@ -118,6 +118,19 @@ func TestTokenExchangeFailureShowsSafeReason(t *testing.T) {
 	}
 }
 
+func TestTokenExchangeFailureClassifiesInvalidRequestWithoutLeakingDescription(t *testing.T) {
+	err := tokenExchangeFailure(&oauth2.RetrieveError{
+		ErrorCode: "invalid_request", ErrorDescription: "missing client_secret " + testAccessToken,
+		Body: []byte(testRefreshToken),
+	})
+	if !errors.Is(err, ErrTokenExchange) || !strings.Contains(err.Error(), "client secret") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), testAccessToken) || strings.Contains(err.Error(), testRefreshToken) {
+		t.Fatalf("error leaked credentials: %v", err)
+	}
+}
+
 func TestAuthorizeTimeoutAndDenial(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		provider := newFakeOAuthProvider(t)
@@ -346,6 +359,10 @@ func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
 		case "/token":
 			if err := request.ParseForm(); err != nil {
 				http.Error(writer, "invalid form", http.StatusBadRequest)
+				return
+			}
+			if request.Form.Get("client_id") != "test-desktop-client" || request.Header.Get("Authorization") != "" {
+				http.Error(writer, `{"error":"invalid_request"}`, http.StatusBadRequest)
 				return
 			}
 			switch request.Form.Get("grant_type") {

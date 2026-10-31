@@ -120,7 +120,7 @@ func NewService(config Config) (*Service, error) {
 	return &Service{
 		oauth: oauth2.Config{
 			ClientID: config.ClientID, ClientSecret: config.ClientSecret,
-			Endpoint: oauth2.Endpoint{AuthURL: config.AuthURL, TokenURL: config.TokenURL},
+			Endpoint: oauth2.Endpoint{AuthURL: config.AuthURL, TokenURL: config.TokenURL, AuthStyle: oauth2.AuthStyleInParams},
 			Scopes:   append([]string(nil), config.Scopes...),
 		},
 		revokeURL: config.RevokeURL, callbackTimeout: config.CallbackTimeout,
@@ -439,6 +439,17 @@ func safeFailure(marker, _ error) error {
 func tokenExchangeFailure(err error) error {
 	var retrieve *oauth2.RetrieveError
 	if errors.As(err, &retrieve) {
+		if retrieve.ErrorCode == "invalid_request" {
+			description := strings.ToLower(retrieve.ErrorDescription)
+			switch {
+			case strings.Contains(description, "client_secret"):
+				return fmt.Errorf("%w: Google rejected the client secret; check the Desktop app credential", ErrTokenExchange)
+			case strings.Contains(description, "redirect_uri"):
+				return fmt.Errorf("%w: Google rejected the redirect URI; use a Desktop app OAuth client", ErrTokenExchange)
+			case strings.Contains(description, "code_verifier"), strings.Contains(description, "code_challenge"):
+				return fmt.Errorf("%w: Google rejected the PKCE parameters", ErrTokenExchange)
+			}
+		}
 		switch retrieve.ErrorCode {
 		case "invalid_client":
 			return fmt.Errorf("%w: Google rejected the OAuth client; check the Desktop app client ID and its client secret", ErrTokenExchange)

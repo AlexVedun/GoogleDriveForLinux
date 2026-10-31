@@ -213,6 +213,13 @@
 - Validation: `go test ./... -count=1`, `go vet ./...`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. Current AppImage SHA-256: `138fc06a9abb1749f0ba0a95db4b1c5c126409f3031d0c8577c058ea14a5c87b`.
 - A live Google token exchange with the user's client was not performed. After updating the AppImage, the existing background `drivefs` service must be stopped with **Quit and unmount** before the new binary is launched.
 
+## Google OAuth `invalid_request` follow-up
+
+- A live sign-in reached Google's token endpoint but reported `invalid_request` after browser authorization. The Go OAuth library's automatic auth-style detection first sent client credentials through HTTP Basic and retried in form parameters. The Google Desktop app documentation shows form parameters, so the endpoint now uses `AuthStyleInParams` directly and sends the authorization code once.
+- Token-exchange diagnostics classify a few known `invalid_request` descriptions into fixed, credential-safe messages. Tests assert form-body client identification and that provider descriptions and response bodies are not shown.
+- Validation: `go test ./... -count=1`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. Current AppImage SHA-256: `df63826b342a01fbb45249e826973920f8fc8d9011d915364f53036459d2f900`.
+- A live Google exchange with the user's OAuth client has not been repeated yet. Stop the old background service with **Quit and unmount** before trying this AppImage.
+
 ## Completion status
 
 Local implementation steps 1–21 and their available checks are complete. The
