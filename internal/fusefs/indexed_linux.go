@@ -10,6 +10,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -116,6 +119,12 @@ func MountIndexedWithWriter(metadata *store.Store, reader *contentcache.Cache, c
 
 func mountIndexed(metadata *store.Store, reader *contentcache.Cache, content *store.ContentStore, mountpoint string) (*fuse.Server, error) {
 	resolvedMountpoint, err := ValidateMountpoint(mountpoint)
+	if errors.Is(err, syscall.ENOTCONN) {
+		if recoverErr := recoverDisconnectedDriveMount(mountpoint); recoverErr != nil {
+			return nil, recoverErr
+		}
+		resolvedMountpoint, err = ValidateMountpoint(mountpoint)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +159,54 @@ func mountIndexed(metadata *store.Store, reader *contentcache.Cache, content *st
 		return nil, fmt.Errorf("mount Drive namespace at %q: %w", resolvedMountpoint, err)
 	}
 	return server, nil
+}
+
+// Only detach our own disconnected FUSE mount. A live or foreign mount is
+// never changed, even when the directory cannot be inspected.
+func recoverDisconnectedDriveMount(mountpoint string) error {
+	point, err := filepath.Abs(mountpoint)
+	if err != nil {
+		return err
+	}
+	info, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return fmt.Errorf("inspect disconnected mount: %w", err)
+	}
+	if !isOwnedDriveMount(info, point, os.Getuid()) {
+		return errors.New("disconnected mount is not this user's Google Drive FUSE mount")
+	}
+	if err := exec.Command("fusermount3", "-u", point).Run(); err != nil {
+		// File managers can hold a reference to a dead FUSE mount. Detach it
+		// only after the ENOTCONN and ownership checks above have passed.
+		if lazyErr := exec.Command("fusermount3", "-uz", point).Run(); lazyErr != nil {
+			return fmt.Errorf("unmount disconnected Google Drive FUSE mount: %w", errors.Join(err, lazyErr))
+		}
+	}
+	return nil
+}
+
+func isOwnedDriveMount(info []byte, point string, uid int) bool {
+	escaped := strings.NewReplacer(`\`, `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`).Replace(point)
+	owner := "user_id=" + strconv.Itoa(uid)
+	for _, line := range strings.Split(string(info), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 10 || fields[4] != escaped {
+			continue
+		}
+		for i, field := range fields {
+			if field != "-" || i+3 >= len(fields) {
+				continue
+			}
+			if fields[i+1] == "fuse.google-drive-linux" && fields[i+2] == "google-drive-linux" {
+				for _, option := range strings.Split(fields[i+3], ",") {
+					if option == owner {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 func ValidateMountpoint(mountpoint string) (string, error) {

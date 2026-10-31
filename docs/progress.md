@@ -227,6 +227,13 @@
 - Validation: `go test ./... -count=1`, `go vet ./...`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. Current AppImage SHA-256: `48f242aade2f9ef60777a2ba34cc8f2614b77f85a654728171d8e7da76931b59`.
 - The user's mounted session was left running. The updated AppImage still needs a live Drive poll and automatic FUSE mount check after the old service is stopped and the new binary starts.
 
+## Disconnected FUSE mount recovery
+
+- After restarting the app, automatic mount failed because the saved directory still held a disconnected `fuse.google-drive-linux` mount (`ENOTCONN`). The current filesystem was verified in `/proc/self/mountinfo` as this user's Google Drive mount. A normal `fusermount3 -u` returned `EBUSY`; guarded `fusermount3 -uz` detached it, and the path became an accessible ordinary directory again.
+- The mount path now checks for `ENOTCONN`, confirms the exact mountpoint, filesystem type, source, and user ID, then unmounts the dead Drive FUSE mount before retrying validation. A busy dead mount uses lazy detach. Responsive or foreign mounts are left untouched.
+- Validation: mountinfo identity tests, `go test ./... -count=1`, `go vet ./...`, `make appimage`, Wayland AppImage `--smoke`, and `git diff --check` passed. Current AppImage SHA-256: `885d3326ec87104a538faf14e55d23237db9f17a5848af821199d9ab3cdc48dc`.
+- The existing app/service process was left running; a fresh real Drive mount with the rebuilt AppImage has not yet been observed.
+
 ## Completion status
 
 Local implementation steps 1–21 and their available checks are complete. The

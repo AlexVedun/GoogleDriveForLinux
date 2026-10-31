@@ -312,6 +312,30 @@ func TestValidateMountpointRequiresEmptyExistingDirectory(t *testing.T) {
 	}
 }
 
+func TestDisconnectedMountRecoveryRecognizesOnlyOwnedDriveMount(t *testing.T) {
+	info := []byte("29 59 0:78 / /home/alex/GoogleDrive rw,nosuid,nodev - fuse.google-drive-linux google-drive-linux rw,user_id=1000,group_id=1000\n")
+	if !isOwnedDriveMount(info, "/home/alex/GoogleDrive", 1000) {
+		t.Fatal("owned Drive mount was not recognized")
+	}
+	for _, test := range []struct {
+		point string
+		uid   int
+		info  []byte
+	}{
+		{"/home/alex/Other", 1000, info},
+		{"/home/alex/GoogleDrive", 1001, info},
+		{"/home/alex/GoogleDrive", 1000, []byte("29 59 0:78 / /home/alex/GoogleDrive rw - fuse.sshfs sshfs rw,user_id=1000\n")},
+	} {
+		if isOwnedDriveMount(test.info, test.point, test.uid) {
+			t.Fatalf("foreign mount accepted: point=%q uid=%d", test.point, test.uid)
+		}
+	}
+	spaced := []byte("29 59 0:78 / /home/alex/My\\040Drive rw - fuse.google-drive-linux google-drive-linux rw,user_id=1000\n")
+	if !isOwnedDriveMount(spaced, "/home/alex/My Drive", 1000) {
+		t.Fatal("escaped mountpoint was not recognized")
+	}
+}
+
 func openIndexedTestStore(t *testing.T, count int) *store.Store {
 	t.Helper()
 	metadata, err := store.Open(t.TempDir() + "/metadata.db")
