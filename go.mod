@@ -3,7 +3,7 @@ module google-drive-linux
 go 1.26.10
 
 require (
-	github.com/hanwen/go-fuse/v2 v2.12.0
+	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/mappu/miqt v0.15.0
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/zalando/go-keyring v0.2.8
