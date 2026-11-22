@@ -8,7 +8,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/oauth2 v0.38.0
-	golang.org/x/sys v0.28.0
+	golang.org/x/sys v0.50.0
 )
 
 require (
