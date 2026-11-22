@@ -76,7 +76,7 @@ jobs:
 
       - name: Verify packaged AppImage and compute SHA-256
         run: |
-          appimage="dist/Google_Drive_for_Linux-${GITHUB_REF_NAME}-x86_64.AppImage"
+          appimage="dist/GoogleDriveForLinux-${GITHUB_REF_NAME}-x86_64.AppImage"
           test -x "$appimage"
           got_version="$("$appimage" --appimage-extract-and-run --version)"
           echo "Packaged version: $got_version"
@@ -87,7 +87,7 @@ jobs:
             echo "Embedded SVG icon failed to rasterize inside the packaged AppImage" >&2
             exit 1
           fi
-          (cd dist && sha256sum "Google_Drive_for_Linux-${GITHUB_REF_NAME}-x86_64.AppImage" > "Google_Drive_for_Linux-${GITHUB_REF_NAME}-x86_64.AppImage.sha256")
+          (cd dist && sha256sum "GoogleDriveForLinux-${GITHUB_REF_NAME}-x86_64.AppImage" > "GoogleDriveForLinux-${GITHUB_REF_NAME}-x86_64.AppImage.sha256")
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
@@ -96,5 +96,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/Google_Drive_for_Linux-${{ github.ref_name }}-x86_64.AppImage
-            dist/Google_Drive_for_Linux-${{ github.ref_name }}-x86_64.AppImage.sha256
+            dist/GoogleDriveForLinux-${{ github.ref_name }}-x86_64.AppImage
+            dist/GoogleDriveForLinux-${{ github.ref_name }}-x86_64.AppImage.sha256

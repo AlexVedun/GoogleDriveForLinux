@@ -139,10 +139,10 @@ QT_CONF
 
 mkdir -p "$dist_dir"
 if [[ -n "${VERSION:-}" ]]; then
-    output_name="Google_Drive_for_Linux-${VERSION}-x86_64.AppImage"
+    output_name="GoogleDriveForLinux-${VERSION}-x86_64.AppImage"
     export VERSION
 else
-    output_name="Google_Drive_for_Linux-x86_64.AppImage"
+    output_name="GoogleDriveForLinux-x86_64.AppImage"
 fi
 export LDAI_OUTPUT="$dist_dir/$output_name"
 "$tools_dir/linuxdeploy-plugin-appimage-x86_64.AppImage" --appimage-extract-and-run \
@@ -151,6 +151,8 @@ export LDAI_OUTPUT="$dist_dir/$output_name"
 if [[ ! -f "$dist_dir/$output_name" ]]; then
     if [[ -f "$root_dir/$output_name" ]]; then
         mv -f "$root_dir/$output_name" "$dist_dir/$output_name"
+    elif [[ -n "${VERSION:-}" && -f "$root_dir/Google_Drive_for_Linux-${VERSION}-x86_64.AppImage" ]]; then
+        mv -f "$root_dir/Google_Drive_for_Linux-${VERSION}-x86_64.AppImage" "$dist_dir/$output_name"
     elif [[ -f "$root_dir/Google_Drive_for_Linux-x86_64.AppImage" ]]; then
         mv -f "$root_dir/Google_Drive_for_Linux-x86_64.AppImage" "$dist_dir/$output_name"
     else

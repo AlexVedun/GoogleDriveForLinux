@@ -35,8 +35,8 @@ make appimage
 To launch a built AppImage, make it executable:
 
 ```sh
-chmod +x Google_Drive_for_Linux-x86_64.AppImage
-./Google_Drive_for_Linux-x86_64.AppImage
+chmod +x GoogleDriveForLinux-x86_64.AppImage
+./GoogleDriveForLinux-x86_64.AppImage
 ```
 
 Create a Google Cloud OAuth client of type **Desktop app**, enable the Drive
@@ -60,7 +60,7 @@ If the AppImage runtime cannot start because FUSE is unavailable, extract and
 launch it:
 
 ```sh
-./Google_Drive_for_Linux-x86_64.AppImage --appimage-extract
+./GoogleDriveForLinux-x86_64.AppImage --appimage-extract
 ./squashfs-root/AppRun
 ```
 
