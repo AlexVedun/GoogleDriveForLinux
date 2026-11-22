@@ -64,6 +64,15 @@ func RunQtApp(smoke bool, socketPath string) int {
 	snapshot.Store(appSnapshot{})
 	var actionMessage atomic.Value
 	actionMessage.Store("")
+	var conflictMessage atomic.Value
+	conflictMessage.Store("")
+	refreshNow := make(chan struct{}, 1)
+	triggerRefresh := func() {
+		select {
+		case refreshNow <- struct{}{}:
+		default:
+		}
+	}
 	var clientMu sync.RWMutex
 	currentClient := client
 	setClient := func(next *ipc.Client) {
@@ -90,6 +99,45 @@ func RunQtApp(smoke bool, socketPath string) int {
 				return
 			}
 			actionMessage.Store(label + " requested")
+			triggerRefresh()
+		}()
+	}
+	var resolvingMu sync.Mutex
+	resolvingConflicts := make(map[domain.EventID]string)
+	resolveConflictAsync := func(eventID domain.EventID, action, label string) {
+		activeClient := getClient()
+		if activeClient == nil {
+			msg := "drivefs is disconnected; restart driveapp to reconnect"
+			conflictMessage.Store(msg)
+			actionMessage.Store(msg)
+			return
+		}
+		resolvingMu.Lock()
+		if resolvingConflicts[eventID] != "" {
+			resolvingMu.Unlock()
+			return
+		}
+		resolvingConflicts[eventID] = action
+		resolvingMu.Unlock()
+		msg := fmt.Sprintf("Applying %q…", label)
+		conflictMessage.Store(msg)
+		actionMessage.Store(msg)
+		go func() {
+			_, err := activeClient.Call(context.Background(), ipc.CommandConflictResolve,
+				map[string]string{"event_id": string(eventID), "action": action}, nil)
+			if err != nil {
+				resolvingMu.Lock()
+				delete(resolvingConflicts, eventID)
+				resolvingMu.Unlock()
+				errMsg := "Resolve conflict failed: " + err.Error()
+				conflictMessage.Store(errMsg)
+				actionMessage.Store(errMsg)
+				return
+			}
+			doneMsg := fmt.Sprintf("Resolved conflict (%s)", label)
+			conflictMessage.Store(doneMsg)
+			actionMessage.Store(doneMsg)
+			triggerRefresh()
 		}()
 	}
 
@@ -169,31 +217,18 @@ func RunQtApp(smoke bool, socketPath string) int {
 
 	conflictPage := qt.NewQWidget2()
 	conflictLayout := qt.NewQVBoxLayout(conflictPage)
-	conflictView := readOnlyTextView()
-	conflictLayout.AddWidget(conflictView.QWidget)
-	conflictID := qt.NewQLineEdit2()
-	conflictID.SetPlaceholderText("Conflict event ID")
-	conflictLayout.AddWidget(conflictID.QWidget)
-	conflictControls := qt.NewQWidget2()
-	conflictControlLayout := qt.NewQHBoxLayout(conflictControls)
-	conflictAction := qt.NewQComboBox2()
-	conflictAction.AddItems([]string{"keep-both", "keep-remote", "keep-local"})
-	conflictControlLayout.AddWidget(conflictAction.QWidget)
-	resolveConflict := qt.NewQPushButton3("Resolve selected conflict")
-	resolveConflict.OnClicked(func() {
-		id := strings.TrimSpace(conflictID.Text())
-		if id == "" {
-			actionMessage.Store("Select or enter a conflict event ID")
-			return
-		}
-		callAsync(ipc.CommandConflictResolve, map[string]string{"event_id": id, "action": conflictAction.CurrentText()}, "Resolve conflict")
-	})
-	conflictControlLayout.AddWidget(resolveConflict.QWidget)
-	conflictLayout.AddWidget(conflictControls)
-	conflictHint := qt.NewQLabel3("Content conflicts support keep-both or keep-remote. Rename/trash conflicts support keep-local or keep-remote.")
+	conflictScroll := qt.NewQScrollArea2()
+	conflictScroll.SetWidgetResizable(true)
+	conflictScroll.SetFrameShape(qt.QFrame__NoFrame)
+	conflictScroll.SetWidget(buildConflictListWidget(nil, nil, nil, resolveConflictAsync))
+	conflictLayout.AddWidget(conflictScroll.QWidget)
+	conflictMessageLabel := qt.NewQLabel3("")
+	conflictMessageLabel.SetWordWrap(true)
+	conflictLayout.AddWidget(conflictMessageLabel.QWidget)
+	conflictHint := qt.NewQLabel3("Choose how to resolve each conflict directly on its card. Content conflicts keep both copies or the Drive version; rename/delete conflicts apply the local change or keep the Drive state.")
 	conflictHint.SetWordWrap(true)
 	conflictLayout.AddWidget(conflictHint.QWidget)
-	tabs.AddTab(conflictPage, "Conflicts")
+	conflictTabIndex := tabs.AddTab(conflictPage, "Conflicts")
 
 	pinsPage := qt.NewQWidget2()
 	pinsLayout := qt.NewQVBoxLayout(pinsPage)
@@ -329,11 +364,13 @@ func RunQtApp(smoke bool, socketPath string) int {
 			pollingStatus.Store("Qt UI updated from a background task")
 		}()
 	} else {
-		go pollDriveFS(socketPath, getClient, setClient, &snapshot, &pollingStatus)
+		go pollDriveFS(socketPath, getClient, setClient, &snapshot, &pollingStatus, refreshNow)
 	}
 	updated := false
 	settingsLoaded := false
 	autoMountAttempted := false
+	lastConflictSignature := conflictViewSignature(nil, nil, nil)
+	lastConflictTabTitle := "Conflicts"
 	poll := qt.NewQTimer()
 	poll.SetInterval(150)
 	poll.OnTimeout(func() {
@@ -345,6 +382,10 @@ func RunQtApp(smoke bool, socketPath string) int {
 		message := actionMessage.Load().(string)
 		if messageLabel.Text() != message {
 			messageLabel.SetText(message)
+		}
+		conflictMsg := conflictMessage.Load().(string)
+		if conflictMessageLabel.Text() != conflictMsg {
+			conflictMessageLabel.SetText(conflictMsg)
 		}
 		state := snapshot.Load().(appSnapshot)
 		if !autoMountAttempted && state.Status.Mounted {
@@ -380,7 +421,42 @@ func RunQtApp(smoke bool, socketPath string) int {
 			settingsLoaded = true
 		}
 		queueView.SetPlainText(renderQueue(state.Queue, state.Errors, state.Status.SyncError))
-		conflictView.SetPlainText(renderConflicts(state.Conflicts, state.Errors))
+		activeConflicts := make(map[domain.EventID]struct{}, len(state.Conflicts))
+		for _, conflict := range state.Conflicts {
+			activeConflicts[conflict.EventID] = struct{}{}
+		}
+		resolvingMu.Lock()
+		for eventID := range resolvingConflicts {
+			if _, ok := activeConflicts[eventID]; !ok {
+				delete(resolvingConflicts, eventID)
+			}
+		}
+		pendingCopy := make(map[domain.EventID]string, len(resolvingConflicts))
+		for eventID, action := range resolvingConflicts {
+			pendingCopy[eventID] = action
+		}
+		resolvingMu.Unlock()
+		if sig := conflictViewSignature(state.Conflicts, state.Errors, pendingCopy); sig != lastConflictSignature {
+			var scrollPos int
+			if bar := conflictScroll.VerticalScrollBar(); bar != nil {
+				scrollPos = bar.Value()
+			}
+			previous := conflictScroll.TakeWidget()
+			conflictScroll.SetWidget(buildConflictListWidget(state.Conflicts, state.Errors, pendingCopy, resolveConflictAsync))
+			if previous != nil {
+				previous.Hide()
+				previous.SetParent(nil)
+				previous.DeleteLater()
+			}
+			if bar := conflictScroll.VerticalScrollBar(); bar != nil {
+				bar.SetValue(scrollPos)
+			}
+			lastConflictSignature = sig
+		}
+		if wantTitle := conflictTabTitle(len(state.Conflicts)); wantTitle != lastConflictTabTitle {
+			tabs.SetTabText(conflictTabIndex, wantTitle)
+			lastConflictTabTitle = wantTitle
+		}
 		pinsView.SetPlainText(renderPins(state.Pins, state.Errors, state.Status))
 		eventsView.SetPlainText(renderEvents(state.Events, state.Errors))
 		tray.SetToolTip("Google Drive for Linux — " + fallback(state.Status.AccountState, "service unavailable"))
@@ -422,7 +498,7 @@ func shouldAutoMount(status drivecontrol.Status, settings drivecontrol.Settings)
 		status.Database != "" && settings.Mountpoint != ""
 }
 
-func pollDriveFS(socketPath string, getClient func() *ipc.Client, setClient func(*ipc.Client), destination *atomic.Value, statusText *atomic.Value) {
+func pollDriveFS(socketPath string, getClient func() *ipc.Client, setClient func(*ipc.Client), destination *atomic.Value, statusText *atomic.Value, refreshNow <-chan struct{}) {
 	for {
 		client := getClient()
 		if client == nil {
@@ -430,7 +506,7 @@ func pollDriveFS(socketPath string, getClient func() *ipc.Client, setClient func
 			client, err = ipc.NewClient(socketPath, 8*time.Second)
 			if err != nil {
 				statusText.Store("drivefs disconnected; restart driveapp to reconnect")
-				time.Sleep(2 * time.Second)
+				waitPollInterval(refreshNow)
 				continue
 			}
 		}
@@ -438,13 +514,22 @@ func pollDriveFS(socketPath string, getClient func() *ipc.Client, setClient func
 		if err != nil {
 			statusText.Store("drivefs disconnected: " + err.Error())
 			setClient(nil)
-			time.Sleep(2 * time.Second)
+			waitPollInterval(refreshNow)
 			continue
 		}
 		setClient(client)
 		destination.Store(state)
 		statusText.Store(renderStatus(state.Status, errorsFound))
-		time.Sleep(2 * time.Second)
+		waitPollInterval(refreshNow)
+	}
+}
+
+func waitPollInterval(refreshNow <-chan struct{}) {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-refreshNow:
+	case <-timer.C:
 	}
 }
 
@@ -516,20 +601,6 @@ func renderQueue(items []drivecontrol.QueueItem, errorsFound []string, syncError
 			fmt.Fprintf(&output, "\n  Error: %s %s", item.ErrorCode, item.ErrorMessage)
 		}
 		output.WriteByte('\n')
-	}
-	appendErrors(&output, errorsFound)
-	return output.String()
-}
-
-func renderConflicts(conflicts []store.ConflictRecord, errorsFound []string) string {
-	var output strings.Builder
-	if len(conflicts) == 0 {
-		output.WriteString("No unresolved conflicts.\n")
-	}
-	for _, conflict := range conflicts {
-		fmt.Fprintf(&output, "Event: %s\nOperation: %s (%s)\nLocal intent: %s\nRemote: %s (version %s)\nLocal copy: %s\nCode: %s\n\n",
-			conflict.EventID, conflict.OperationID, conflict.LocalOperationKind, conflict.LocalIntent,
-			conflict.RemoteName, conflict.RemoteVersion, conflict.LocalCopyName, conflict.Code)
 	}
 	appendErrors(&output, errorsFound)
 	return output.String()
