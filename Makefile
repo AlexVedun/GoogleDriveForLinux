@@ -1,5 +1,7 @@
 .PHONY: test vet build check qt-smoke appimage
 
+LDFLAGS := $(if $(VERSION),-ldflags "-X google-drive-linux/internal/version.Version=$(VERSION)",)
+
 test:
 	go test ./...
 
@@ -8,8 +10,8 @@ vet:
 
 build:
 	mkdir -p bin
-	go build -o bin/drivefs ./cmd/drivefs
-	go build -o bin/driveapp ./cmd/driveapp
+	go build $(LDFLAGS) -o bin/drivefs ./cmd/drivefs
+	go build $(LDFLAGS) -o bin/driveapp ./cmd/driveapp
 
 check: test vet build
 

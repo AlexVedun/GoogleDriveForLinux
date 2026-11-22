@@ -6,9 +6,8 @@ import (
 	"os"
 
 	"google-drive-linux/internal/app"
+	"google-drive-linux/internal/version"
 )
-
-const version = "0.0.0-dev"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -17,7 +16,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println(version)
+		fmt.Println(version.Version)
 		return
 	}
 

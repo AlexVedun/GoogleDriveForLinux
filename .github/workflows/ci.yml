@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and Build (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install Qt 6 and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            qt6-base-dev \
+            qt6-wayland \
+            libqt6svg6 \
+            libxcb-cursor0
+
+      - name: Verify toolchain
+        run: |
+          go version
+          pkg-config --modversion Qt6Widgets
+
+      - name: Run tests
+        run: go test -count=1 ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Build binaries
+        run: make build
+
+      - name: Verify binary versions and offscreen Qt smoke check
+        run: |
+          ./bin/drivefs --version
+          ./bin/driveapp --version
+          smoke_output="$(QT_QPA_PLATFORM=offscreen ./bin/driveapp --smoke)"
+          printf '%s\n' "$smoke_output"
+          if printf '%s\n' "$smoke_output" | grep -q "warning: embedded SVG icon could not be rasterized"; then
+            echo "Embedded SVG icon failed to rasterize" >&2
+            exit 1
+          fi

@@ -38,7 +38,31 @@ exec "$HERE/usr/bin/driveapp" "$@"
 APP_RUN
 chmod 0755 "$app_dir/AppRun"
 
-export EXTRA_PLATFORM_PLUGINS='libqwayland.so;libqoffscreen.so'
+if [[ -z "${QMAKE:-}" ]]; then
+    for candidate in qmake6 qmake-qt6 qmake; do
+        if QMAKE="$(command -v "$candidate" 2>/dev/null)"; then
+            break
+        fi
+    done
+fi
+if [[ -z "${QMAKE:-}" || ! -x "$QMAKE" ]]; then
+    echo "Unable to locate qmake6/qmake; install Qt 6 development tools or set QMAKE." >&2
+    exit 1
+fi
+export QMAKE
+qt_plugins_dir="$("$QMAKE" -query QT_INSTALL_PLUGINS)"
+qt_libs_dir="$("$QMAKE" -query QT_INSTALL_LIBS)"
+
+if [[ -z "${EXTRA_PLATFORM_PLUGINS:-}" ]]; then
+    extra_plugins=()
+    for plugin in libqwayland.so libqwayland-egl.so libqwayland-generic.so libqoffscreen.so; do
+        if [[ -f "$qt_plugins_dir/platforms/$plugin" ]]; then
+            extra_plugins+=("$plugin")
+        fi
+    done
+    EXTRA_PLATFORM_PLUGINS="$(IFS=';'; echo "${extra_plugins[*]-}")"
+fi
+export EXTRA_PLATFORM_PLUGINS
 export APPIMAGE_EXTRACT_AND_RUN=1
 export LDAI_RUNTIME_FILE="$tools_dir/appimage-runtime-x86_64"
 export NO_STRIP=1 # bundled linuxdeploy strip is too old for Fedora 44 RELR ELF sections
@@ -50,19 +74,54 @@ export NO_STRIP=1 # bundled linuxdeploy strip is too old for Fedora 44 RELR ELF 
     --icon-file "$app_dir/usr/share/icons/hicolor/scalable/apps/google-drive-linux.svg" \
     --plugin qt
 
-# linuxdeploy rewrites ELF runpaths, and its patched Fedora 44 libraries can
+# linuxdeploy rewrites ELF runpaths, and its patched system libraries can
 # retain a DT_INIT address that no longer points at the relocated .init code.
 # AppRun already resolves shared libraries through LD_LIBRARY_PATH, so restore
 # their original bytes after linuxdeploy has finished collecting dependencies.
+declare -A system_libs=()
+while read -r line; do
+    [[ "$line" == *"x86-64"* ]] || continue
+    soname="${line%% *}"
+    resolved="${line##* => }"
+    if [[ -n "$soname" && "$resolved" == /* && -z "${system_libs[$soname]:-}" ]]; then
+        system_libs["$soname"]="$resolved"
+    fi
+done < <(PATH="/usr/sbin:/sbin:$PATH" ldconfig -p 2>/dev/null || true)
+
+find_system_library() {
+    local name="$1"
+    local candidate
+    for candidate in \
+        "$qt_libs_dir/$name" \
+        "${system_libs[$name]:-}" \
+        "/usr/lib64/$name" \
+        "/usr/lib/x86_64-linux-gnu/$name" \
+        "/lib/x86_64-linux-gnu/$name" \
+        "/usr/lib/$name"; do
+        if [[ -n "$candidate" && -e "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    candidate="$(find /usr/lib /usr/lib64 /lib -maxdepth 4 \( -type f -o -type l \) -name "$name" -print -quit 2>/dev/null || true)"
+    if [[ -n "$candidate" && -e "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
 for bundled in "$app_dir"/usr/lib/*; do
-    [[ -f "$bundled" ]] || continue
-    original="/usr/lib64/${bundled##*/}"
-    [[ -f "$original" ]] || { echo "Missing original library: $original" >&2; exit 1; }
+    [[ -f "$bundled" || -L "$bundled" ]] || continue
+    original="$(find_system_library "${bundled##*/}")" || {
+        echo "Missing original library: ${bundled##*/}" >&2
+        exit 1
+    }
     cp -L -- "$original" "$bundled"
 done
 while IFS= read -r -d '' bundled; do
     relative="${bundled#"$app_dir/usr/plugins/"}"
-    original="/usr/lib64/qt6/plugins/$relative"
+    original="$qt_plugins_dir/$relative"
     [[ -f "$original" ]] || { echo "Missing original Qt plugin: $original" >&2; exit 1; }
     cp -L -- "$original" "$bundled"
 done < <(find "$app_dir/usr/plugins" -type f -name '*.so' -print0)
@@ -77,8 +136,25 @@ Prefix=..
 Plugins=plugins
 QT_CONF
 "$root_dir/scripts/bundle-appimage-rpm-licenses.sh" "$app_dir"
+
+mkdir -p "$dist_dir"
+if [[ -n "${VERSION:-}" ]]; then
+    output_name="Google_Drive_for_Linux-${VERSION}-x86_64.AppImage"
+    export VERSION
+else
+    output_name="Google_Drive_for_Linux-x86_64.AppImage"
+fi
+export LDAI_OUTPUT="$dist_dir/$output_name"
 "$tools_dir/linuxdeploy-plugin-appimage-x86_64.AppImage" --appimage-extract-and-run \
     --appdir "$app_dir"
 
-mkdir -p "$dist_dir"
-mv -f "$root_dir"/Google_Drive_for_Linux-x86_64.AppImage "$dist_dir/Google_Drive_for_Linux-x86_64.AppImage"
+if [[ ! -f "$dist_dir/$output_name" ]]; then
+    if [[ -f "$root_dir/$output_name" ]]; then
+        mv -f "$root_dir/$output_name" "$dist_dir/$output_name"
+    elif [[ -f "$root_dir/Google_Drive_for_Linux-x86_64.AppImage" ]]; then
+        mv -f "$root_dir/Google_Drive_for_Linux-x86_64.AppImage" "$dist_dir/$output_name"
+    else
+        echo "Expected AppImage was not generated: $dist_dir/$output_name" >&2
+        exit 1
+    fi
+fi

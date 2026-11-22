@@ -1,0 +1,100 @@
+name: Release AppImage
+
+on:
+  push:
+    tags:
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    permissions: {}
+    outputs:
+      valid: ${{ steps.check.outputs.valid }}
+
+    steps:
+      - name: Check X.Y.Z tag format
+        id: check
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping release for non-X.Y.Z tag: $TAG_NAME"
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Build and Publish AppImage
+    needs: validate-tag
+    if: needs.validate-tag.outputs.valid == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install Qt 6 and AppImage packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            pkg-config \
+            qmake6 \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-wayland \
+            libqt6svg6 \
+            libxcb-cursor0
+
+      - name: Run tests
+        run: go test -count=1 ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Build AppImage
+        run: |
+          export VERSION="${GITHUB_REF_NAME}"
+          export GOCACHE="$(go env GOCACHE)"
+          export GOMODCACHE="$(go env GOMODCACHE)"
+          ./scripts/package-appimage.sh
+
+      - name: Verify packaged AppImage and compute SHA-256
+        run: |
+          appimage="dist/Google_Drive_for_Linux-${GITHUB_REF_NAME}-x86_64.AppImage"
+          test -x "$appimage"
+          got_version="$("$appimage" --appimage-extract-and-run --version)"
+          echo "Packaged version: $got_version"
+          test "$got_version" = "${GITHUB_REF_NAME}"
+          smoke_output="$(QT_QPA_PLATFORM=offscreen "$appimage" --appimage-extract-and-run --smoke)"
+          printf '%s\n' "$smoke_output"
+          if printf '%s\n' "$smoke_output" | grep -q "warning: embedded SVG icon could not be rasterized"; then
+            echo "Embedded SVG icon failed to rasterize inside the packaged AppImage" >&2
+            exit 1
+          fi
+          (cd dist && sha256sum "Google_Drive_for_Linux-${GITHUB_REF_NAME}-x86_64.AppImage" > "Google_Drive_for_Linux-${GITHUB_REF_NAME}-x86_64.AppImage.sha256")
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Google Drive for Linux ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/Google_Drive_for_Linux-${{ github.ref_name }}-x86_64.AppImage
+            dist/Google_Drive_for_Linux-${{ github.ref_name }}-x86_64.AppImage.sha256
