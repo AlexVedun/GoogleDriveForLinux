@@ -348,6 +348,28 @@ func (s *ContentStore) CurrentContentVersion(ctx context.Context, objectID domai
 		FROM content_versions WHERE object_id = ? AND is_current = 1`, string(objectID)))
 }
 
+// CurrentLocalContentVersion returns the current pending local content only when
+// it has not yet been uploaded or still matches the object's indexed Drive version.
+func (s *ContentStore) CurrentLocalContentVersion(ctx context.Context, object domain.Object) (domain.ContentVersion, bool, error) {
+	current, err := s.CurrentContentVersion(ctx, object.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ContentVersion{}, false, nil
+	}
+	if err != nil {
+		return domain.ContentVersion{}, false, err
+	}
+	if current.Kind != domain.ContentPending || !current.Complete {
+		return domain.ContentVersion{}, false, nil
+	}
+	if current.DriveVersion == "" {
+		return current, true, nil
+	}
+	if object.DriveVersion != "" && current.DriveVersion == object.DriveVersion {
+		return current, true, nil
+	}
+	return domain.ContentVersion{}, false, nil
+}
+
 func (s *ContentStore) OpenContentVersion(ctx context.Context, versionID domain.ContentVersionID) (*os.File, domain.ContentVersion, error) {
 	version, err := scanContentVersion(s.metadata.db.QueryRowContext(ctx, `SELECT version_id, object_id, kind, local_path,
 		size_bytes, COALESCE(sha256, ''), COALESCE(drive_version, ''), is_complete, is_current, created_at

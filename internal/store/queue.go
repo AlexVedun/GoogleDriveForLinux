@@ -249,8 +249,9 @@ func (s *Store) CommitRemoteOperation(ctx context.Context, operationID domain.Op
 		return fmt.Errorf("cannot commit operation %q from state %q", operationID, op.State)
 	}
 	var currentDriveID sql.NullString
+	var previousDriveVersion sql.NullString
 	var currentVersion sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT drive_file_id FROM objects WHERE object_id = ?`, string(op.ObjectID)).Scan(&currentDriveID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT drive_file_id, drive_version FROM objects WHERE object_id = ?`, string(op.ObjectID)).Scan(&currentDriveID, &previousDriveVersion); err != nil {
 		return fmt.Errorf("read object before remote commit: %w", err)
 	}
 	if currentDriveID.Valid && currentDriveID.String != remote.DriveFileID {
@@ -281,6 +282,12 @@ func (s *Store) CommitRemoteOperation(ctx context.Context, operationID domain.Op
 		if _, err := tx.ExecContext(ctx, `UPDATE content_versions SET drive_version = ? WHERE version_id = ? AND object_id = ?`,
 			remote.DriveVersion, string(*op.ContentVersionID), string(op.ObjectID)); err != nil {
 			return fmt.Errorf("record uploaded content Drive version: %w", err)
+		}
+	} else if op.Kind == domain.OperationRename && previousDriveVersion.Valid && previousDriveVersion.String != "" && remote.DriveVersion != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE content_versions SET drive_version = ?
+			WHERE object_id = ? AND is_current = 1 AND kind = 'pending' AND drive_version = ?`,
+			remote.DriveVersion, string(op.ObjectID), previousDriveVersion.String); err != nil {
+			return fmt.Errorf("advance local content Drive version across rename: %w", err)
 		}
 	}
 	if remote.DriveVersion != "" {

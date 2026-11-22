@@ -132,14 +132,14 @@ func (c *Cache) open(ctx context.Context, object domain.Object, progress func(do
 	lock.Lock()
 	defer lock.Unlock()
 
-	if current, err := c.content.CurrentContentVersion(ctx, object.ID); err == nil && current.Kind == domain.ContentPending && current.Complete {
+	if current, ok, err := c.content.CurrentLocalContentVersion(ctx, object); err != nil {
+		return nil, fmt.Errorf("check local content: %w", err)
+	} else if ok {
 		file, version, err := c.content.OpenContentVersion(ctx, current.ID)
 		if err != nil {
 			return nil, fmt.Errorf("open locally saved content: %w", err)
 		}
 		return &Handle{file: file, size: version.Size}, nil
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("check local content: %w", err)
 	}
 
 	if object.DriveVersion == "" || object.DriveFileID == nil {

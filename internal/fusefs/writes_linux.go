@@ -142,17 +142,17 @@ func (m *writeManager) newWorkingCopy(ctx context.Context, object domain.Object,
 	if truncate {
 		return m.content.NewWorkingFile(ctx, 0, bytes.NewReader(nil))
 	}
-	current, err := m.content.CurrentContentVersion(ctx, object.ID)
-	if err == nil && current.Kind == domain.ContentPending && current.Complete {
+	current, ok, err := m.content.CurrentLocalContentVersion(ctx, object)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		file, version, err := m.content.OpenContentVersion(ctx, current.ID)
 		if err != nil {
 			return nil, err
 		}
 		defer file.Close()
 		return m.content.NewWorkingFile(ctx, version.Size, io.NewSectionReader(file, 0, version.Size))
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
 	}
 	if object.DriveFileID == nil {
 		return m.content.NewWorkingFile(ctx, 0, bytes.NewReader(nil))

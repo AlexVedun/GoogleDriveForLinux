@@ -609,6 +609,14 @@ func upsertRemoteEntry(ctx context.Context, tx *sql.Tx, parentObjectID domain.Ob
 		if err != nil {
 			return fmt.Errorf("update indexed Drive object: %w", err)
 		}
+		if object.DriveVersion != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE content_versions SET is_current = 0
+				WHERE object_id = ? AND is_current = 1 AND kind = 'pending'
+				AND COALESCE(drive_version, '') <> '' AND drive_version <> ?`,
+				string(object.ID), object.DriveVersion); err != nil {
+				return fmt.Errorf("retire stale committed local content: %w", err)
+			}
+		}
 	}
 	return upsertDirectoryEntry(ctx, tx, parentObjectID, object.ID, string(*object.DriveFileID), entry.RemoteName)
 }

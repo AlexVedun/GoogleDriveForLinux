@@ -470,6 +470,14 @@ func (s *Store) PreserveNamespaceConflict(ctx context.Context, operationID domai
 		remote.Object.WebViewLink, remote.Object.CapabilitiesJSON, formatTime(time.Now()), string(operation.ObjectID)); err != nil {
 		return fmt.Errorf("apply remote version after namespace conflict: %w", err)
 	}
+	if remote.Object.DriveVersion != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE content_versions SET is_current = 0
+			WHERE object_id = ? AND is_current = 1 AND kind = 'pending'
+			AND COALESCE(drive_version, '') <> '' AND drive_version <> ?`,
+			string(operation.ObjectID), remote.Object.DriveVersion); err != nil {
+			return fmt.Errorf("retire stale committed local content after namespace conflict: %w", err)
+		}
+	}
 	parentID, parentErr := objectIDForParent(ctx, tx, remote.ParentDriveFileID)
 	if parentErr != nil && !errors.Is(parentErr, sql.ErrNoRows) {
 		return parentErr

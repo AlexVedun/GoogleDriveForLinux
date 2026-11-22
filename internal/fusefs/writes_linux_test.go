@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -650,5 +651,81 @@ func assertPendingContent(t *testing.T, ctx context.Context, metadata *store.Sto
 	object, err := metadata.ObjectByID(ctx, objectID)
 	if err != nil || object.Size != int64(len(expected)) {
 		t.Fatalf("object size = %d, err=%v; want %d", object.Size, err, len(expected))
+	}
+}
+
+func TestFUSEEditLoadsUpdatedRemoteContentAfterLocalCreateWasEditedRemotely(t *testing.T) {
+	ctx := context.Background()
+	metadata := openIndexedTestStore(t, 0)
+	defer metadata.Close()
+	content, err := store.NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive := &indexedReadDrive{}
+	reader, err := contentcache.New(drive, metadata, content, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := NewIndexedRootWithWriter(metadata, reader, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fs.NewNodeFS(root, &fs.Options{RootStableAttr: &fs.StableAttr{Ino: uint64(store.RootInode)}})
+
+	inode, handle, _, errno := root.Create(ctx, "synced.txt", uint32(os.O_RDWR), 0o644, &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("Create errno = %v", errno)
+	}
+	node := inode.Operations().(*IndexedNode)
+	if written, errno := node.Write(ctx, handle, []byte("local v1"), 0); errno != 0 || written != 8 {
+		t.Fatalf("Write = %d, %v", written, errno)
+	}
+	if errno := node.Release(ctx, handle); errno != 0 {
+		t.Fatalf("Release errno = %v", errno)
+	}
+
+	claimed, found, err := metadata.ClaimNextOperation(ctx, time.Now())
+	if err != nil || !found {
+		t.Fatalf("ClaimNextOperation = (%#v, %v, %v)", claimed, found, err)
+	}
+	if err := metadata.CommitRemoteOperation(ctx, claimed.ID, store.RemoteCommit{
+		DriveFileID: "drive-fuse-1", MIMEType: "text/plain", Size: 8, DriveVersion: "v1",
+		CapabilitiesJSON: `{"canEdit":true,"canDownload":true}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another computer updates the file on Drive to v2.
+	remoteV2 := []byte("remote v2")
+	drive.file = driveapi.File{
+		ID: "drive-fuse-1", MIMEType: "text/plain", Size: int64(len(remoteV2)), Version: "v2",
+		MD5Checksum:  checksumString(remoteV2),
+		Capabilities: driveapi.Capabilities{CanDownload: true, CanEdit: true},
+	}
+	drive.payload = remoteV2
+	page, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteEntry := indexedTestEntry("drive-fuse-1", "synced.txt", "root-drive", "text/plain", int64(len(remoteV2)))
+	remoteEntry.Object.DriveVersion = "v2"
+	remoteEntry.Object.CapabilitiesJSON = `{"canEdit":true,"canDownload":true}`
+	if err := metadata.CommitChangePage(ctx, page, []store.RemoteChange{{DriveFileID: "drive-fuse-1", Entry: &remoteEntry}}, "", "live-v2"); err != nil {
+		t.Fatal(err)
+	}
+
+	editHandle, _, errno := node.Open(ctx, uint32(os.O_RDWR))
+	if errno != 0 {
+		t.Fatalf("Open(O_RDWR) after remote update errno = %v", errno)
+	}
+	defer node.Release(ctx, editHandle)
+	readRes, errno := node.Read(ctx, editHandle, make([]byte, len(remoteV2)), 0)
+	if errno != 0 {
+		t.Fatalf("Read errno = %v", errno)
+	}
+	got, _ := readRes.Bytes(make([]byte, len(remoteV2)))
+	if string(got) != string(remoteV2) {
+		t.Fatalf("FUSE O_RDWR read = %q, want %q", got, remoteV2)
 	}
 }

@@ -948,3 +948,101 @@ func TestDisplayNamesRejectUnsafePathComponents(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteUpdateRetiresSupersededCommittedLocalContent(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	localObj, err := metadata.CreateLocalFile(ctx, domain.RootObjectID, "note.txt", "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, err := content.WritePending(ctx, WriteRequest{
+		ObjectID: localObj.ID, Kind: domain.OperationCreate,
+		IdempotencyKey: "create-note", ExpectedSize: 8,
+	}, strings.NewReader("local v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Uncommitted local write (drive_version == "") is returned.
+	if cv, ok, err := content.CurrentLocalContentVersion(ctx, localObj); err != nil || !ok || cv.ID != written.ContentVersion.ID {
+		t.Fatalf("uncommitted CurrentLocalContentVersion = (%#v, %v, %v)", cv, ok, err)
+	}
+
+	claimed, found, err := metadata.ClaimNextOperation(ctx, time.Now())
+	if err != nil || !found || claimed.ID != written.Operation.ID {
+		t.Fatalf("ClaimNextOperation = (%#v, %v, %v)", claimed, found, err)
+	}
+	if err := metadata.CommitRemoteOperation(ctx, claimed.ID, RemoteCommit{
+		DriveFileID: "drive-note-1", MIMEType: "text/plain", Size: 8, DriveVersion: "v1", CapabilitiesJSON: `{"canEdit":true}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createdObj, err := metadata.ObjectByID(ctx, localObj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cv, ok, err := content.CurrentLocalContentVersion(ctx, createdObj); err != nil || !ok || cv.DriveVersion != "v1" {
+		t.Fatalf("committed CurrentLocalContentVersion = (%#v, %v, %v)", cv, ok, err)
+	}
+
+	// Own rename advances drive_version on the committed local content version.
+	if _, err := metadata.QueueRename(ctx, domain.RootObjectID, "note.txt", domain.RootObjectID, "note-renamed.txt", false); err != nil {
+		t.Fatal(err)
+	}
+	renameOp, found, err := metadata.ClaimNextOperation(ctx, time.Now())
+	if err != nil || !found || renameOp.Kind != domain.OperationRename {
+		t.Fatalf("ClaimNextOperation(rename) = (%#v, %v, %v)", renameOp, found, err)
+	}
+	if err := metadata.CommitRemoteOperation(ctx, renameOp.ID, RemoteCommit{
+		DriveFileID: "drive-note-1", MIMEType: "text/plain", Size: 8, DriveVersion: "v2", CapabilitiesJSON: `{"canEdit":true}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	renamedObj, err := metadata.ObjectByID(ctx, localObj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cv, ok, err := content.CurrentLocalContentVersion(ctx, renamedObj); err != nil || !ok || cv.DriveVersion != "v2" {
+		t.Fatalf("renamed CurrentLocalContentVersion = (%#v, %v, %v)", cv, ok, err)
+	}
+
+	// Remote edit from another computer bumps DriveVersion to v3 and retires local pending content.
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteEdit := indexedRemoteEntry("drive-note-1", "note-renamed.txt", "root-drive")
+	remoteEdit.Object.Size = 18
+	remoteEdit.Object.DriveVersion = "v3"
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "drive-note-1", Entry: &remoteEdit}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	updatedObj, err := metadata.ObjectByID(ctx, localObj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cv, ok, err := content.CurrentLocalContentVersion(ctx, updatedObj); err != nil || ok {
+		t.Fatalf("stale local content was still active after remote edit: (%#v, %v, %v)", cv, ok, err)
+	}
+	if _, err := content.CurrentContentVersion(ctx, localObj.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("CurrentContentVersion after remote edit = %v, want sql.ErrNoRows", err)
+	}
+}

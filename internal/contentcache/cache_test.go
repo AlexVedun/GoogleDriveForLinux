@@ -11,8 +11,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google-drive-linux/internal/domain"
 	"google-drive-linux/internal/driveapi"
@@ -481,3 +483,132 @@ func (b *brokenBody) Read(buffer []byte) (int, error) {
 }
 
 func (b *brokenBody) Close() error { return nil }
+
+func TestOpenDownloadsUpdatedRemoteVersionForLocallyCreatedFile(t *testing.T) {
+	for _, viaChangeFeed := range []bool{true, false} {
+		name := "retired-by-change-feed"
+		if !viaChangeFeed {
+			name = "legacy-unretired-row"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			metadata, err := store.Open(filepath.Join(root, "metadata.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer metadata.Close()
+			if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+				t.Fatal(err)
+			}
+			if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+				t.Fatal(err)
+			}
+			content, err := store.NewContentStore(metadata, filepath.Join(root, "content"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			localObj, err := metadata.CreateLocalFile(ctx, domain.RootObjectID, "shared.txt", "text/plain")
+			if err != nil {
+				t.Fatal(err)
+			}
+			written, err := content.WritePending(ctx, store.WriteRequest{
+				ObjectID: localObj.ID, Kind: domain.OperationCreate,
+				IdempotencyKey: "create-shared", ExpectedSize: 8,
+			}, strings.NewReader("local v1"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimed, found, err := metadata.ClaimNextOperation(ctx, time.Now())
+			if err != nil || !found || claimed.ID != written.Operation.ID {
+				t.Fatalf("ClaimNextOperation = (%#v, %v, %v)", claimed, found, err)
+			}
+			if err := metadata.CommitRemoteOperation(ctx, claimed.ID, store.RemoteCommit{
+				DriveFileID: "drive-shared-1", MIMEType: "text/plain", Size: 8, DriveVersion: "v1", CapabilitiesJSON: `{"canEdit":true,"canDownload":true}`,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			drive := &cacheFakeDrive{getError: errors.New("offline")}
+			cache, err := New(drive, metadata, content, 1<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			createdObj, err := metadata.ObjectByID(ctx, localObj.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			localHandle, err := cache.Open(ctx, createdObj)
+			if err != nil {
+				t.Fatalf("offline open of locally created v1 failed: %v", err)
+			}
+			if got := string(readAllAt(t, localHandle)); got != "local v1" {
+				t.Fatalf("offline open got %q, want %q", got, "local v1")
+			}
+			_ = localHandle.Close()
+
+			remotePayload := []byte("edited on another pc")
+			driveID := domain.DriveFileID("drive-shared-1")
+			drive.getError = nil
+			drive.files = []driveapi.File{remoteForObject("drive-shared-1", "v2", remotePayload)}
+			drive.payload = remotePayload
+
+			var updatedObj domain.Object
+			if viaChangeFeed {
+				pageToken, err := metadata.BeginChangePoll(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				change := store.RemoteEntry{
+					Object: domain.Object{
+						ID: domain.ObjectID("drive:drive-shared-1"), DriveFileID: &driveID,
+						MIMEType: "text/plain", Size: int64(len(remotePayload)), DriveVersion: "v2",
+						CapabilitiesJSON: `{"canEdit":true,"canDownload":true}`,
+					},
+					RemoteName: "shared.txt", ParentDriveFileID: "root-drive",
+				}
+				if err := metadata.CommitChangePage(ctx, pageToken, []store.RemoteChange{{DriveFileID: "drive-shared-1", Entry: &change}}, "", "live-2"); err != nil {
+					t.Fatal(err)
+				}
+				updatedObj, err = metadata.ObjectByID(ctx, localObj.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Simulate an existing DB where objects was updated to v2 while old content_versions kept is_current = 1, drive_version = 'v1'.
+				rawDB, err := sql.Open("google-drive-sqlite3", filepath.Join(root, "metadata.db")+"?_busy_timeout=5000")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := rawDB.ExecContext(ctx, `UPDATE objects SET drive_version = 'v2', size_bytes = ? WHERE object_id = ?`,
+					len(remotePayload), string(localObj.ID)); err != nil {
+					_ = rawDB.Close()
+					t.Fatal(err)
+				}
+				if err := rawDB.Close(); err != nil {
+					t.Fatal(err)
+				}
+				updatedObj, err = metadata.ObjectByID(ctx, localObj.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			remoteHandle, err := cache.Open(ctx, updatedObj)
+			if err != nil {
+				t.Fatalf("open updated remote v2 failed: %v", err)
+			}
+			defer remoteHandle.Close()
+			if got := string(readAllAt(t, remoteHandle)); got != string(remotePayload) {
+				t.Fatalf("Open returned %q, want %q", got, remotePayload)
+			}
+			if drive.downloadCalls != 1 {
+				t.Fatalf("downloadCalls = %d, want 1", drive.downloadCalls)
+			}
+		})
+	}
+}
