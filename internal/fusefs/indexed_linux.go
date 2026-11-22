@@ -7,8 +7,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +45,8 @@ type IndexedNode struct {
 type indexedFileHandle struct {
 	content *contentcache.Handle
 }
+
+type workspaceLinkHandle struct{ content []byte }
 
 var (
 	_ fs.InodeEmbedder = (*IndexedNode)(nil)
@@ -250,6 +254,9 @@ func (n *IndexedNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	if errno != 0 {
 		return nil, errno
 	}
+	if isNativeWorkspaceObject(child) {
+		child.Size = int64(len(workspaceLinkContent(child)))
+	}
 	fillAttr(&out.Attr, child, mode)
 	return n.NewInode(ctx, &IndexedNode{metadata: n.metadata, reader: n.reader, writer: n.writer, objectID: child.ID}, fs.StableAttr{
 		Mode: mode & syscall.S_IFMT,
@@ -276,9 +283,7 @@ func (n *IndexedNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 		case googleFolderMIMEType:
 			mode = fuse.S_IFDIR
 		default:
-			if !strings.HasPrefix(child.MIMEType, "application/vnd.google-apps.") {
-				mode = fuse.S_IFREG
-			}
+			mode = fuse.S_IFREG
 		}
 		entries = append(entries, fuse.DirEntry{
 			Name: child.Entry.DisplayName,
@@ -305,6 +310,9 @@ func (n *IndexedNode) Getattr(ctx context.Context, handle fs.FileHandle, out *fu
 			return ioErrno(err)
 		}
 	}
+	if isNativeWorkspaceObject(object) {
+		object.Size = int64(len(workspaceLinkContent(object)))
+	}
 	fillAttr(&out.Attr, object, mode)
 	return 0
 }
@@ -316,6 +324,12 @@ func (n *IndexedNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 	}
 	if object.MIMEType == googleFolderMIMEType {
 		return nil, 0, syscall.EISDIR
+	}
+	if isNativeWorkspaceObject(object) {
+		if flags&uint32(os.O_WRONLY|os.O_RDWR|os.O_TRUNC) != 0 {
+			return nil, 0, syscall.EROFS
+		}
+		return &workspaceLinkHandle{content: workspaceLinkContent(object)}, fuse.FOPEN_DIRECT_IO, 0
 	}
 	if _, errno := n.modeForObject(object); errno != 0 {
 		return nil, 0, errno
@@ -342,6 +356,15 @@ func (n *IndexedNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, ui
 }
 
 func (n *IndexedNode) Read(_ context.Context, handle fs.FileHandle, destination []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
+	if link, ok := handle.(*workspaceLinkHandle); ok {
+		if offset < 0 {
+			return nil, syscall.EINVAL
+		}
+		if offset >= int64(len(link.content)) {
+			return fuse.ReadResultData(nil), 0
+		}
+		return fuse.ReadResultData(link.content[offset:min(int64(len(link.content)), offset+int64(len(destination)))]), 0
+	}
 	if file, ok := handle.(*writeHandle); ok {
 		if n.writer == nil {
 			return nil, syscall.EBADF
@@ -364,6 +387,9 @@ func (n *IndexedNode) Read(_ context.Context, handle fs.FileHandle, destination 
 }
 
 func (n *IndexedNode) Release(ctx context.Context, handle fs.FileHandle) syscall.Errno {
+	if _, ok := handle.(*workspaceLinkHandle); ok {
+		return 0
+	}
 	if file, ok := handle.(*writeHandle); ok {
 		if n.writer == nil {
 			return syscall.EBADF
@@ -606,16 +632,33 @@ func modeForObject(object domain.Object) (uint32, syscall.Errno) {
 	case googleFolderMIMEType:
 		return fuse.S_IFDIR | 0o555, 0
 	default:
-		if strings.HasPrefix(object.MIMEType, "application/vnd.google-apps.") {
-			return 0, syscall.EOPNOTSUPP
-		}
 		return fuse.S_IFREG | 0o444, 0
 	}
 }
 
+func isNativeWorkspaceObject(object domain.Object) bool {
+	return object.MIMEType != googleFolderMIMEType && strings.HasPrefix(object.MIMEType, "application/vnd.google-apps.")
+}
+
+func workspaceLinkContent(object domain.Object) []byte {
+	target := object.WebViewLink
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Scheme != "https" || (parsed.Hostname() != "docs.google.com" && parsed.Hostname() != "drive.google.com") {
+		target = ""
+	}
+	if target == "" && object.DriveFileID != nil {
+		target = "https://drive.google.com/open?id=" + url.QueryEscape(string(*object.DriveFileID))
+	}
+	if target == "" {
+		return []byte("<!doctype html><meta charset=\"utf-8\"><title>Google Workspace document unavailable</title>")
+	}
+	escaped := html.EscapeString(target)
+	return []byte("<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url=" + escaped + "\"><title>Google Workspace document</title><p><a href=\"" + escaped + "\">Open in Google Drive</a></p>")
+}
+
 func (n *IndexedNode) modeForObject(object domain.Object) (uint32, syscall.Errno) {
 	mode, errno := modeForObject(object)
-	if errno != 0 || n.writer == nil {
+	if errno != 0 || n.writer == nil || isNativeWorkspaceObject(object) {
 		return mode, errno
 	}
 	if object.MIMEType == googleFolderMIMEType {

@@ -59,8 +59,8 @@ func TestIndexedNamespaceEnumeratesThousandsAndKeepsStableInodes(t *testing.T) {
 		t.Fatalf("folder readdir entry = %#v, exists=%v", folderEntry, exists)
 	}
 	docEntry, exists := byName["native-doc"]
-	if !exists || docEntry.Mode != 0 {
-		t.Fatalf("unsupported native document should have unknown dirent type: %#v, exists=%v", docEntry, exists)
+	if !exists || docEntry.Mode != fuse.S_IFREG {
+		t.Fatalf("native document link should be a regular file: %#v, exists=%v", docEntry, exists)
 	}
 	folderInode, errno := root.Lookup(ctx, "folder", &fuse.EntryOut{})
 	if errno != 0 {
@@ -100,8 +100,32 @@ func TestIndexedNamespaceEnumeratesThousandsAndKeepsStableInodes(t *testing.T) {
 			fileInode.StableAttr().Ino, secondLookup.StableAttr().Ino, errno)
 	}
 
-	if _, errno := root.Lookup(ctx, "native-doc", &fuse.EntryOut{}); errno != syscall.EOPNOTSUPP {
-		t.Fatalf("native Docs lookup errno = %v, want EOPNOTSUPP", errno)
+	docInode, errno := root.Lookup(ctx, "native-doc", &fuse.EntryOut{})
+	if errno != 0 {
+		t.Fatalf("native Docs lookup errno = %v", errno)
+	}
+	docNode := docInode.Operations().(*IndexedNode)
+	var docAttr fuse.AttrOut
+	if errno := docNode.Getattr(ctx, nil, &docAttr); errno != 0 || docAttr.Mode&syscall.S_IFMT != syscall.S_IFREG || docAttr.Size == 0 {
+		t.Fatalf("native Docs attrs = %#v, errno = %v", docAttr.Attr, errno)
+	}
+	linkHandle, _, errno := docNode.Open(ctx, 0)
+	if errno != 0 {
+		t.Fatalf("native Docs open errno = %v", errno)
+	}
+	result, errno := docNode.Read(ctx, linkHandle, make([]byte, docAttr.Size), 0)
+	if errno != 0 {
+		t.Fatalf("native Docs read errno = %v", errno)
+	}
+	link, _ := result.Bytes(make([]byte, docAttr.Size))
+	if !bytes.Contains(link, []byte("https://drive.google.com/open?id=native-doc")) {
+		t.Fatalf("native Docs link does not point to Drive: %q", link)
+	}
+	if errno := docNode.Release(ctx, linkHandle); errno != 0 {
+		t.Fatalf("native Docs release errno = %v", errno)
+	}
+	if _, _, errno := docNode.Open(ctx, uint32(os.O_WRONLY)); errno != syscall.EROFS {
+		t.Fatalf("native Docs write-open errno = %v, want EROFS", errno)
 	}
 	if _, _, _, errno := root.Create(ctx, "new.txt", 0, 0o644, &fuse.EntryOut{}); errno != syscall.EROFS {
 		t.Fatalf("create errno = %v, want EROFS", errno)
@@ -333,6 +357,21 @@ func TestDisconnectedMountRecoveryRecognizesOnlyOwnedDriveMount(t *testing.T) {
 	spaced := []byte("29 59 0:78 / /home/alex/My\\040Drive rw - fuse.google-drive-linux google-drive-linux rw,user_id=1000\n")
 	if !isOwnedDriveMount(spaced, "/home/alex/My Drive", 1000) {
 		t.Fatal("escaped mountpoint was not recognized")
+	}
+}
+
+func TestWorkspaceLinkUsesAllowedGoogleURL(t *testing.T) {
+	id := domain.DriveFileID("sheet-id")
+	object := domain.Object{DriveFileID: &id, MIMEType: "application/vnd.google-apps.spreadsheet",
+		WebViewLink: "https://docs.google.com/spreadsheets/d/sheet-id/edit?name=a&mode=b"}
+	content := workspaceLinkContent(object)
+	if !bytes.Contains(content, []byte("https://docs.google.com/spreadsheets/d/sheet-id/edit?name=a&amp;mode=b")) {
+		t.Fatalf("Workspace link was not HTML escaped: %q", content)
+	}
+	object.WebViewLink = "javascript:alert(1)"
+	content = workspaceLinkContent(object)
+	if bytes.Contains(content, []byte("javascript:")) || !bytes.Contains(content, []byte("https://drive.google.com/open?id=sheet-id")) {
+		t.Fatalf("unsafe Workspace link was not replaced: %q", content)
 	}
 }
 
