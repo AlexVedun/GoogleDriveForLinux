@@ -263,9 +263,10 @@ func (s *Service) Revoke(ctx context.Context) error {
 		if err != nil {
 			return safeFailure(ErrTokenRevocation, err)
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4*1024))
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
 		_ = response.Body.Close()
-		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		if (response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices) &&
+			!isAlreadyRevokedResponse(response.StatusCode, body) {
 			return ErrTokenRevocation
 		}
 	}
@@ -273,6 +274,19 @@ func (s *Service) Revoke(ctx context.Context) error {
 		return safeFailure(ErrCredentialStore, err)
 	}
 	return nil
+}
+
+func isAlreadyRevokedResponse(status int, body []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	return payload.Error == "invalid_token"
 }
 
 func (s *Service) loadToken(ctx context.Context) (*oauth2.Token, error) {
@@ -396,7 +410,8 @@ func (s *persistingTokenSource) Token() (*oauth2.Token, error) {
 	token, err := s.source.Token()
 	if err != nil {
 		var retrieveError *oauth2.RetrieveError
-		if errors.As(err, &retrieveError) && retrieveError.ErrorCode == "invalid_grant" {
+		if (errors.As(err, &retrieveError) && retrieveError.ErrorCode == "invalid_grant") ||
+			(s.current != nil && s.current.RefreshToken == "" && !s.current.Valid()) {
 			return nil, safeFailure(ErrReauthorizationRequired, err)
 		}
 		return nil, safeFailure(ErrTokenRefresh, err)

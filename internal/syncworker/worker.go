@@ -397,7 +397,8 @@ func (w *Worker) processRename(ctx context.Context, operation domain.Operation, 
 	if baseVersion == "" {
 		baseVersion = object.DriveVersion
 	}
-	if baseVersion != "" && remote.Version != baseVersion {
+	if baseVersion != "" && remote.Version != baseVersion &&
+		!w.isBenignNamespaceVersionBump(ctx, object, payload.OldParentObjectID, payload.OldName, remote) {
 		return w.preserveNamespaceConflict(ctx, operation, object, remote)
 	}
 	var addParent, removeParent []string
@@ -448,11 +449,14 @@ func (w *Worker) processTrash(ctx context.Context, operation domain.Operation, o
 	if remote.Trashed {
 		return w.commit(ctx, operation, remote)
 	}
+	var payload operationPayload
+	payloadErr := json.Unmarshal([]byte(operation.PayloadJSON), &payload)
 	baseVersion := operation.BaseDriveVersion
 	if baseVersion == "" {
 		baseVersion = object.DriveVersion
 	}
-	if baseVersion != "" && remote.Version != baseVersion {
+	if baseVersion != "" && remote.Version != baseVersion &&
+		(payloadErr != nil || !w.isBenignNamespaceVersionBump(ctx, object, payload.ParentObjectID, payload.Name, remote)) {
 		return w.preserveNamespaceConflict(ctx, operation, object, remote)
 	}
 	trashed := true
@@ -675,6 +679,39 @@ func (w *Worker) preserveWriteConflict(ctx context.Context, operation domain.Ope
 	return fmt.Errorf("%w (remote_version_changed; both versions were preserved)", ErrRemoteConflict)
 }
 
+func (w *Worker) isBenignNamespaceVersionBump(ctx context.Context, object domain.Object, expectedParentID domain.ObjectID,
+	expectedName string, remote driveapi.File) bool {
+	if remote.Trashed || expectedParentID == "" || expectedName == "" ||
+		remote.Name != expectedName || remote.MIMEType != object.MIMEType {
+		return false
+	}
+	if object.ModifiedAt.IsZero() || remote.ModifiedTime.IsZero() || !remote.ModifiedTime.Equal(object.ModifiedAt) {
+		return false
+	}
+	expectedParent, err := w.metadata.ObjectByID(ctx, expectedParentID)
+	if err != nil || expectedParent.DriveFileID == nil || !contains(remote.Parents, string(*expectedParent.DriveFileID)) {
+		return false
+	}
+	if remote.Size != object.Size {
+		operations, err := w.metadata.OperationsForObject(ctx, object.ID)
+		if err != nil {
+			return false
+		}
+		hasPendingWrite := false
+		for _, op := range operations {
+			if op.Kind == domain.OperationWrite && op.State != domain.OperationCommitted &&
+				op.State != domain.OperationConflict && op.State != domain.OperationPermanentError {
+				hasPendingWrite = true
+				break
+			}
+		}
+		if !hasPendingWrite {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *Worker) preserveNamespaceConflict(ctx context.Context, operation domain.Operation, object domain.Object,
 	remote driveapi.File) error {
 	entry, err := w.remoteConflictEntry(ctx, object, remote)
@@ -735,7 +772,8 @@ func (w *Worker) setFailure(ctx context.Context, operation domain.Operation, cau
 	}
 	if mutationMayHaveApplied {
 		var apiErr *driveapi.APIError
-		knownRejection := errors.As(cause, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 && apiErr.StatusCode != 409
+		knownRejection := (errors.As(cause, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 && apiErr.StatusCode != 409) ||
+			errors.Is(cause, driveapi.ErrUnauthenticated)
 		if !knownRejection || errors.Is(cause, driveapi.ErrTemporary) || isHTTPConflict(cause) || errors.Is(cause, driveapi.ErrUnexpectedResponse) {
 			if err := w.metadata.SetOperationState(ctx, operation.ID, domain.OperationNeedsReconcile, "outcome_unknown",
 				"The remote result will be checked before retrying", time.Now()); err != nil {

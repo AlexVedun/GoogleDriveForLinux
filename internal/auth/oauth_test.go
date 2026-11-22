@@ -225,6 +225,24 @@ func TestExpiredTokensRefreshOrRequireReauthorization(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("expired token without refresh token requires reauthorization", func(t *testing.T) {
+		provider := newFakeOAuthProvider(t)
+		secrets := newMemorySecretStore()
+		secrets.tokens["primary"] = marshalTestToken(t, &oauth2.Token{
+			AccessToken: "expired-access-only",
+			TokenType:   "Bearer", Expiry: time.Now().Add(-time.Hour),
+		})
+		service := newTestService(t, provider, secrets, browserFunc(func(context.Context, string) error { return nil }), time.Second)
+		source, err := service.TokenSource(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = source.Token()
+		if !errors.Is(err, ErrReauthorizationRequired) {
+			t.Fatalf("Token error = %v, want ErrReauthorizationRequired", err)
+		}
+	})
 }
 
 func TestCredentialStoreErrorsDoNotLeakOAuthTokens(t *testing.T) {
@@ -269,6 +287,22 @@ func TestRevokeDeletesCredentialOnlyAfterRemoteSuccess(t *testing.T) {
 		}
 		if provider.revokedToken() != "revoke-refresh" {
 			t.Fatalf("remote revoked token = %q, want refresh token", provider.revokedToken())
+		}
+	})
+
+	t.Run("already revoked invalid_token deletes local credential", func(t *testing.T) {
+		provider := newFakeOAuthProvider(t)
+		provider.setRevokeResponse(http.StatusBadRequest, `{"error":"invalid_token"}`)
+		secrets := newMemorySecretStore()
+		secrets.tokens["primary"] = marshalTestToken(t, &oauth2.Token{
+			AccessToken: "expired-access", RefreshToken: "revoked-refresh", TokenType: "Bearer",
+		})
+		service := newTestService(t, provider, secrets, browserFunc(func(context.Context, string) error { return nil }), time.Second)
+		if err := service.Revoke(context.Background()); err != nil {
+			t.Fatalf("Revoke error = %v, want nil for invalid_token", err)
+		}
+		if _, err := secrets.Get(context.Background(), "primary"); !errors.Is(err, secretstore.ErrNotFound) {
+			t.Fatalf("credential after invalid_token revoke error = %v, want not found", err)
 		}
 	})
 
@@ -349,6 +383,7 @@ type fakeOAuthProvider struct {
 	exchanges    int
 	revoked      string
 	revokeStatus int
+	revokeBody   string
 }
 
 func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
@@ -399,8 +434,15 @@ func newFakeOAuthProvider(t *testing.T) *fakeOAuthProvider {
 			provider.mu.Lock()
 			provider.revoked = request.Form.Get("token")
 			status := provider.revokeStatus
+			body := provider.revokeBody
 			provider.mu.Unlock()
+			if body != "" {
+				writer.Header().Set("Content-Type", "application/json")
+			}
 			writer.WriteHeader(status)
+			if body != "" {
+				_, _ = io.WriteString(writer, body)
+			}
 		default:
 			http.NotFound(writer, request)
 		}
@@ -431,9 +473,14 @@ func (p *fakeOAuthProvider) exchangeCount() int {
 }
 
 func (p *fakeOAuthProvider) setRevokeStatus(status int) {
+	p.setRevokeResponse(status, "")
+}
+
+func (p *fakeOAuthProvider) setRevokeResponse(status int, body string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.revokeStatus = status
+	p.revokeBody = body
 }
 
 func (p *fakeOAuthProvider) revokedToken() string {

@@ -314,3 +314,11 @@ func (s *Store) CommitSkippedOperation(ctx context.Context, operationID domain.O
 	}
 	return nil
 }
+
+func (s *Store) RetryAuthorizationErrors(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE operations SET next_attempt_at = NULL, updated_at = ?
+		WHERE state = 'retryable-error' AND last_error_code = 'authorization_required'`, formatTime(time.Now())); err != nil {
+		return fmt.Errorf("clear authorization retry backoff: %w", err)
+	}
+	return nil
+}

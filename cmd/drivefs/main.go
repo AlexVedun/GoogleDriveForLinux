@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -181,21 +182,18 @@ func runIPCServer(socketPath string) error {
 				return current.IsAuthenticated(ctx)
 			},
 			SignIn: func(ctx context.Context) error {
-				if runtimeManager.current() != nil {
-					return nil
-				}
 				current, err := loadOAuth()
 				if err != nil {
+					return err
+				}
+				if _, err := current.Authorize(ctx); err != nil {
 					return err
 				}
 				oauthMu.Lock()
 				oauth = current
 				runtimeManager.setOAuth(current)
 				oauthMu.Unlock()
-				if _, err := current.Authorize(ctx); err != nil {
-					return err
-				}
-				return runtimeManager.start(ctx)
+				return runtimeManager.startOrReload(ctx)
 			},
 			SignOut: func(ctx context.Context) error {
 				oauthMu.Lock()
@@ -230,6 +228,27 @@ func runIPCServer(socketPath string) error {
 	return serveErr
 }
 
+type reloadableTokenSource struct {
+	mu     sync.RWMutex
+	source oauth2.TokenSource
+}
+
+func (s *reloadableTokenSource) Token() (*oauth2.Token, error) {
+	s.mu.RLock()
+	source := s.source
+	s.mu.RUnlock()
+	if source == nil {
+		return nil, auth.ErrNotAuthenticated
+	}
+	return source.Token()
+}
+
+func (s *reloadableTokenSource) set(source oauth2.TokenSource) {
+	s.mu.Lock()
+	s.source = source
+	s.mu.Unlock()
+}
+
 type syncRuntimeManager struct {
 	mu            sync.RWMutex
 	database      string
@@ -237,6 +256,8 @@ type syncRuntimeManager struct {
 	oauth         *auth.Service
 	runtime       *syncservice.Runtime
 	runtimeCancel context.CancelFunc
+	runtimeCtx    context.Context
+	tokenSource   *reloadableTokenSource
 	lastError     string
 }
 
@@ -267,7 +288,10 @@ func (m *syncRuntimeManager) start(ctx context.Context) error {
 		cancel()
 		return m.setError(fmt.Errorf("load Google authorization: %w", err))
 	}
-	client, err := driveapi.NewClient(driveapi.Config{HTTPClient: oauth2.NewClient(runtimeCtx, tokenSource)})
+	reloadable := &reloadableTokenSource{source: tokenSource}
+	client, err := driveapi.NewClient(driveapi.Config{
+		HTTPClient: &http.Client{Transport: &oauth2.Transport{Source: reloadable}},
+	})
 	if err != nil {
 		cancel()
 		return m.setError(fmt.Errorf("configure Google Drive API: %w", err))
@@ -282,7 +306,7 @@ func (m *syncRuntimeManager) start(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	if m.runtime == nil {
-		m.runtime, m.runtimeCancel = runtime, cancel
+		m.runtime, m.runtimeCancel, m.runtimeCtx, m.tokenSource = runtime, cancel, runtimeCtx, reloadable
 		m.lastError = ""
 		m.mu.Unlock()
 		return nil
@@ -292,11 +316,36 @@ func (m *syncRuntimeManager) start(ctx context.Context) error {
 	return runtime.Close()
 }
 
+func (m *syncRuntimeManager) startOrReload(ctx context.Context) error {
+	m.mu.RLock()
+	runtime := m.runtime
+	oauth := m.oauth
+	runtimeCtx := m.runtimeCtx
+	reloadable := m.tokenSource
+	m.mu.RUnlock()
+	if runtime == nil || reloadable == nil || runtimeCtx == nil {
+		return m.start(ctx)
+	}
+	if oauth == nil {
+		return m.setError(errors.New("Google OAuth is not configured"))
+	}
+	fresh, err := oauth.TokenSource(runtimeCtx)
+	if err != nil {
+		return m.setError(fmt.Errorf("load Google authorization: %w", err))
+	}
+	reloadable.set(fresh)
+	m.mu.Lock()
+	m.lastError = ""
+	m.mu.Unlock()
+	runtime.NotifyAuthChanged()
+	return nil
+}
+
 func (m *syncRuntimeManager) stop() error {
 	m.mu.Lock()
 	runtime := m.runtime
 	cancel := m.runtimeCancel
-	m.runtime, m.runtimeCancel = nil, nil
+	m.runtime, m.runtimeCancel, m.runtimeCtx, m.tokenSource = nil, nil, nil, nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()

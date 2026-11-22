@@ -65,6 +65,8 @@ type Runtime struct {
 	status Status
 
 	pinsChanged chan struct{}
+	pollNow     chan struct{}
+	workNow     chan struct{}
 	closeOnce   sync.Once
 	closeErr    error
 }
@@ -118,6 +120,8 @@ func New(config Config) (*Runtime, error) {
 		worker: worker, pins: pins, ctx: ctx, cancel: cancel,
 		status:      Status{NetworkState: "connecting", IndexState: "not-started", PinState: "idle"},
 		pinsChanged: make(chan struct{}, 1),
+		pollNow:     make(chan struct{}, 1),
+		workNow:     make(chan struct{}, 1),
 	}
 	// Start all loops only after recovery and every component have initialized.
 	runtime.wg.Add(3)
@@ -136,6 +140,18 @@ func (r *Runtime) SetCacheLimit(limit int64) error { return r.cache.SetMaxBytes(
 func (r *Runtime) NotifyPinsChanged() {
 	select {
 	case r.pinsChanged <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Runtime) NotifyAuthChanged() {
+	_ = r.metadata.RetryAuthorizationErrors(r.ctx)
+	select {
+	case r.pollNow <- struct{}{}:
+	default:
+	}
+	select {
+	case r.workNow <- struct{}{}:
 	default:
 	}
 }
@@ -179,6 +195,7 @@ func (r *Runtime) pollLoop(interval time.Duration) {
 		select {
 		case <-r.ctx.Done():
 			return
+		case <-r.pollNow:
 		case <-ticker.C:
 		}
 	}
@@ -206,6 +223,7 @@ func (r *Runtime) workLoop(interval time.Duration) {
 		select {
 		case <-r.ctx.Done():
 			return
+		case <-r.workNow:
 		case <-ticker.C:
 		}
 	}

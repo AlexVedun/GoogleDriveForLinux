@@ -345,6 +345,54 @@ func preserveWriteConflictTx(ctx context.Context, tx *sql.Tx, objectID domain.Ob
 	return copy, nil
 }
 
+func isBenignNamespaceChangeTx(ctx context.Context, tx *sql.Tx, objectID domain.ObjectID, operationID domain.OperationID,
+	kind domain.OperationKind, remoteParentID domain.ObjectID, remote RemoteEntry) (bool, error) {
+	if remote.Object.Deleted {
+		return false, nil
+	}
+	var payloadJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT payload_json FROM operations WHERE operation_id = ?`, string(operationID)).Scan(&payloadJSON); err != nil {
+		return false, fmt.Errorf("read namespace operation payload: %w", err)
+	}
+	var payload namespacePayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return false, nil
+	}
+	var expectedParentID domain.ObjectID
+	var expectedName string
+	switch kind {
+	case domain.OperationRename:
+		expectedParentID, expectedName = payload.OldParentObjectID, payload.OldName
+	case domain.OperationTrash:
+		expectedParentID, expectedName = payload.ParentObjectID, payload.Name
+	default:
+		return false, nil
+	}
+	if expectedParentID == "" || expectedName == "" || remoteParentID != expectedParentID || remote.RemoteName != expectedName {
+		return false, nil
+	}
+	localObject, err := scanObject(tx.QueryRowContext(ctx, objectSelect+` WHERE object_id = ?`, string(objectID)))
+	if err != nil {
+		return false, fmt.Errorf("read local object for namespace conflict check: %w", err)
+	}
+	if remote.Object.MIMEType != localObject.MIMEType ||
+		localObject.ModifiedAt.IsZero() || remote.Object.ModifiedAt.IsZero() ||
+		!remote.Object.ModifiedAt.Equal(localObject.ModifiedAt) {
+		return false, nil
+	}
+	if remote.Object.Size != localObject.Size {
+		var hasPendingWrite int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE object_id = ? AND kind = 'write'
+			AND state IN ('prepared', 'queued', 'uploading', 'retryable-error', 'needs-reconcile'))`, string(objectID)).Scan(&hasPendingWrite); err != nil {
+			return false, fmt.Errorf("check pending write during namespace conflict check: %w", err)
+		}
+		if hasPendingWrite == 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func markRemoteNamespaceConflictTx(ctx context.Context, tx *sql.Tx, objectID domain.ObjectID,
 	operationID domain.OperationID, remote RemoteEntry) error {
 	operation, err := (&ContentStore{metadata: nil}).scanOperation(tx.QueryRowContext(ctx, `SELECT operation_id, object_id, kind, state,

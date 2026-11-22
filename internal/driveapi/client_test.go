@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google-drive-linux/internal/auth"
 )
 
 func TestDriveOperationsAgainstFakeServer(t *testing.T) {
@@ -453,6 +455,89 @@ func TestInputValidationAndContextTimeout(t *testing.T) {
 	}
 	if _, err := client.GetFile(context.Background(), "file-1"); !errors.Is(err, ErrTemporary) {
 		t.Fatalf("timed request error = %v, want ErrTemporary", err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestTransportAuthErrorsArePropagatedSafelyWithoutLeakingURL(t *testing.T) {
+	const secretSession = "https://upload.example.invalid/secret-session-token"
+	cases := []struct {
+		name            string
+		transportErr    error
+		wantMatch       []error
+		wantNotMatch    []error
+		wantAttempts    int32
+	}{
+		{
+			name:         "reauthorization required fails without retry",
+			transportErr: &url.Error{Op: "Get", URL: secretSession, Err: fmt.Errorf("oauth2: %w", auth.ErrReauthorizationRequired)},
+			wantMatch:    []error{ErrUnauthenticated, auth.ErrReauthorizationRequired},
+			wantNotMatch: []error{ErrTemporary},
+			wantAttempts: 1,
+		},
+		{
+			name:         "not authenticated fails without retry",
+			transportErr: &url.Error{Op: "Get", URL: secretSession, Err: auth.ErrNotAuthenticated},
+			wantMatch:    []error{ErrUnauthenticated, auth.ErrNotAuthenticated},
+			wantNotMatch: []error{ErrTemporary},
+			wantAttempts: 1,
+		},
+		{
+			name:         "credential store fails without retry",
+			transportErr: &url.Error{Op: "Get", URL: secretSession, Err: fmt.Errorf("keyring: %w", auth.ErrCredentialStore)},
+			wantMatch:    []error{ErrTemporary, auth.ErrCredentialStore},
+			wantAttempts: 1,
+		},
+		{
+			name:         "token refresh retries safely",
+			transportErr: &url.Error{Op: "Get", URL: secretSession, Err: fmt.Errorf("oauth2: %w", auth.ErrTokenRefresh)},
+			wantMatch:    []error{ErrTemporary, auth.ErrTokenRefresh},
+			wantAttempts: 3,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			client, err := NewClient(Config{
+				BaseURL:   "https://drive.example.invalid/drive/v3",
+				UploadURL: "https://upload.example.invalid/upload/drive/v3",
+				HTTPClient: &http.Client{
+					Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						attempts.Add(1)
+						return nil, tc.transportErr
+					}),
+				},
+				Retry: RetryPolicy{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.GetFile(context.Background(), "file-1")
+			if err == nil {
+				t.Fatal("expected transport error")
+			}
+			if attempts.Load() != tc.wantAttempts {
+				t.Fatalf("attempts = %d, want %d", attempts.Load(), tc.wantAttempts)
+			}
+			for _, want := range tc.wantMatch {
+				if !errors.Is(err, want) {
+					t.Fatalf("error %v does not match %v", err, want)
+				}
+			}
+			for _, notWant := range tc.wantNotMatch {
+				if errors.Is(err, notWant) {
+					t.Fatalf("error %v unexpectedly matched %v", err, notWant)
+				}
+			}
+			if strings.Contains(err.Error(), secretSession) {
+				t.Fatalf("error leaked URL: %v", err)
+			}
+		})
 	}
 }
 

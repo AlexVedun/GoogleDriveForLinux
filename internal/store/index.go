@@ -563,6 +563,15 @@ func upsertRemoteEntry(ctx context.Context, tx *sql.Tx, parentObjectID domain.Ob
 				}
 				return nil
 			}
+			if kind == domain.OperationRename || kind == domain.OperationTrash {
+				benign, err := isBenignNamespaceChangeTx(ctx, tx, object.ID, operationID, kind, parentObjectID, entry)
+				if err != nil {
+					return err
+				}
+				if benign {
+					return writeRemoteShadow(ctx, tx, parentObjectID, entry, false, confirmed)
+				}
+			}
 			if err := markRemoteNamespaceConflictTx(ctx, tx, object.ID, operationID, entry); err != nil {
 				return err
 			}

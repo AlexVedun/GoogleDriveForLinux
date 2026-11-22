@@ -552,6 +552,103 @@ func TestRemoteRenameConflictCanRetryLocalIntentAgainstLatestVersion(t *testing.
 	}
 }
 
+func TestBenignVersionBumpDuringPendingRenameDoesNotCreateConflict(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	modified := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	entry := indexedRemoteEntry("atomic-file", ".goutputstream-5US5X3", "root-drive")
+	entry.Object.Size = 128
+	entry.Object.DriveVersion = "1"
+	entry.Object.ModifiedAt = modified
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", []RemoteEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := metadata.QueueRename(ctx, domain.RootObjectID, ".goutputstream-5US5X3", domain.RootObjectID, "zshrc", false); err != nil {
+		t.Fatal(err)
+	}
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bumped := indexedRemoteEntry("atomic-file", ".goutputstream-5US5X3", "root-drive")
+	bumped.Object.Size = 128
+	bumped.Object.DriveVersion = "2"
+	bumped.Object.ModifiedAt = modified
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "atomic-file", Entry: &bumped}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	operations, err := metadata.OperationsForObject(ctx, entry.Object.ID)
+	if err != nil || len(operations) != 1 || operations[0].State != domain.OperationQueued {
+		t.Fatalf("benign version bump altered rename operation: %#v, err = %v", operations, err)
+	}
+	conflicts, err := metadata.Conflicts(ctx)
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("benign version bump created conflict: %#v, err = %v", conflicts, err)
+	}
+	if _, err := metadata.DirectoryEntry(ctx, domain.RootObjectID, "zshrc"); err != nil {
+		t.Fatalf("local renamed entry was lost: %v", err)
+	}
+	shadow, err := metadata.RemoteShadow(ctx, entry.Object.ID)
+	if err != nil || !shadow.Confirmed || shadow.DriveVersion != "2" {
+		t.Fatalf("remote shadow was not updated to version 2: %#v, err = %v", shadow, err)
+	}
+}
+
+func TestRemoteModifiedTimeChangeDuringPendingRenameStillMarksConflict(t *testing.T) {
+	ctx := context.Background()
+	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	modified := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	entry := indexedRemoteEntry("edited-file", "notes.txt", "root-drive")
+	entry.Object.Size = 128
+	entry.Object.DriveVersion = "1"
+	entry.Object.ModifiedAt = modified
+	if err := metadata.BeginInitialIndex(ctx, "snapshot", "root-drive"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialIndexPage(ctx, "root-drive", "", []RemoteEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.CommitInitialChanges(ctx, nil, "", "live-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := metadata.QueueRename(ctx, domain.RootObjectID, "notes.txt", domain.RootObjectID, "notes-local.txt", false); err != nil {
+		t.Fatal(err)
+	}
+	pageToken, err := metadata.BeginChangePoll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := indexedRemoteEntry("edited-file", "notes.txt", "root-drive")
+	edited.Object.Size = 128
+	edited.Object.DriveVersion = "2"
+	edited.Object.ModifiedAt = modified.Add(time.Minute)
+	if err := metadata.CommitChangePage(ctx, pageToken, []RemoteChange{{DriveFileID: "edited-file", Entry: &edited}}, "", "live-2"); err != nil {
+		t.Fatal(err)
+	}
+	operations, err := metadata.OperationsForObject(ctx, entry.Object.ID)
+	if err != nil || len(operations) != 1 || operations[0].State != domain.OperationConflict {
+		t.Fatalf("remote content edit did not mark conflict: %#v, err = %v", operations, err)
+	}
+	conflicts, err := metadata.Conflicts(ctx)
+	if err != nil || len(conflicts) != 1 || conflicts[0].Code != remoteNamespaceConflictCode {
+		t.Fatalf("conflicts = %#v, err = %v", conflicts, err)
+	}
+}
+
 func TestOwnOperationMarkerAvoidsFalseRemoteWriteConflict(t *testing.T) {
 	ctx := context.Background()
 	metadata, err := Open(filepath.Join(t.TempDir(), "metadata.db"))

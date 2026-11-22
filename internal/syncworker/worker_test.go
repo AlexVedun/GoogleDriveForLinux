@@ -899,6 +899,144 @@ func TestWorkerPreservesRemotePathWhenRenameOrTrashRaces(t *testing.T) {
 	}
 }
 
+func TestWorkerIgnoresBenignDriveVersionBumpOnAtomicSaveRenameAndTrash(t *testing.T) {
+	t.Run("atomic save create then rename survives Drive metadata version bump", func(t *testing.T) {
+		ctx, metadata, content, drive, worker := newWorkerFixture(t)
+		object, createOp := createQueuedFile(t, ctx, metadata, content, ".goutputstream-5US5X3",
+			[]byte("export PATH=$PATH"), "create-atomic-zshrc")
+		if _, err := metadata.QueueRename(ctx, domain.RootObjectID, ".goutputstream-5US5X3",
+			domain.RootObjectID, "zshrc", false); err != nil {
+			t.Fatal(err)
+		}
+		if worked, err := worker.RunOne(ctx); !worked || err != nil {
+			t.Fatalf("create worked=%v err=%v", worked, err)
+		}
+		createdOp, err := metadata.OperationByID(ctx, createOp.ID)
+		if err != nil || createdOp.State != domain.OperationCommitted {
+			t.Fatalf("create state = %#v err=%v", createdOp, err)
+		}
+		createdObj, err := metadata.ObjectByID(ctx, object.ID)
+		if err != nil || createdObj.DriveFileID == nil {
+			t.Fatalf("created object = %#v err=%v", createdObj, err)
+		}
+		driveID := string(*createdObj.DriveFileID)
+		remote := drive.files[driveID]
+		remote.Version = nextVersion(remote.Version)
+		drive.files[driveID] = remote
+
+		if worked, err := worker.RunOne(ctx); !worked || err != nil {
+			t.Fatalf("rename after benign version bump worked=%v err=%v", worked, err)
+		}
+		if got := drive.files[driveID].Name; got != "zshrc" {
+			t.Fatalf("remote name = %q, want zshrc", got)
+		}
+		conflicts, err := metadata.Conflicts(ctx)
+		if err != nil || len(conflicts) != 0 {
+			t.Fatalf("unexpected conflicts = %#v err=%v", conflicts, err)
+		}
+	})
+
+	t.Run("trash survives benign Drive metadata version bump", func(t *testing.T) {
+		ctx, metadata, content, drive, worker := newWorkerFixture(t)
+		object, _ := createQueuedFile(t, ctx, metadata, content, "temp.txt", []byte("data"), "create-temp-trash")
+		if worked, err := worker.RunOne(ctx); !worked || err != nil {
+			t.Fatalf("create worked=%v err=%v", worked, err)
+		}
+		createdObj, err := metadata.ObjectByID(ctx, object.ID)
+		if err != nil || createdObj.DriveFileID == nil {
+			t.Fatalf("created object = %#v err=%v", createdObj, err)
+		}
+		driveID := string(*createdObj.DriveFileID)
+		if _, err := metadata.QueueTrash(ctx, domain.RootObjectID, "temp.txt", false); err != nil {
+			t.Fatal(err)
+		}
+		remote := drive.files[driveID]
+		remote.Version = nextVersion(remote.Version)
+		drive.files[driveID] = remote
+
+		if worked, err := worker.RunOne(ctx); !worked || err != nil {
+			t.Fatalf("trash after benign version bump worked=%v err=%v", worked, err)
+		}
+		if !drive.files[driveID].Trashed {
+			t.Fatal("remote file was not trashed after benign version bump")
+		}
+		conflicts, err := metadata.Conflicts(ctx)
+		if err != nil || len(conflicts) != 0 {
+			t.Fatalf("unexpected conflicts = %#v err=%v", conflicts, err)
+		}
+	})
+
+	t.Run("real remote content edit with matching name still conflicts", func(t *testing.T) {
+		for _, kind := range []string{"rename", "trash"} {
+			t.Run(kind, func(t *testing.T) {
+				ctx, metadata, content, drive, worker := newWorkerFixture(t)
+				object, _ := createQueuedFile(t, ctx, metadata, content, "shared-"+kind+".txt", []byte("v1"), "create-"+kind)
+				if worked, err := worker.RunOne(ctx); !worked || err != nil {
+					t.Fatalf("create worked=%v err=%v", worked, err)
+				}
+				createdObj, err := metadata.ObjectByID(ctx, object.ID)
+				if err != nil || createdObj.DriveFileID == nil {
+					t.Fatalf("created object = %#v err=%v", createdObj, err)
+				}
+				driveID := string(*createdObj.DriveFileID)
+				if kind == "rename" {
+					if _, err := metadata.QueueRename(ctx, domain.RootObjectID, "shared-"+kind+".txt",
+						domain.RootObjectID, "renamed-"+kind+".txt", false); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if _, err := metadata.QueueTrash(ctx, domain.RootObjectID, "shared-"+kind+".txt", false); err != nil {
+						t.Fatal(err)
+					}
+				}
+				remote := drive.files[driveID]
+				remote.Version = nextVersion(remote.Version)
+				remote.ModifiedTime = remote.ModifiedTime.Add(time.Minute)
+				drive.files[driveID] = remote
+
+				if worked, err := worker.RunOne(ctx); !worked || !errors.Is(err, ErrRemoteConflict) {
+					t.Fatalf("%s with modified timestamp worked=%v err=%v, want ErrRemoteConflict", kind, worked, err)
+				}
+			})
+		}
+	})
+}
+
+type unauthUpdateDrive struct {
+	*memoryDrive
+}
+
+func (d unauthUpdateDrive) UpdateFile(context.Context, string, driveapi.FilePatch, []string, []string) (driveapi.File, error) {
+	return driveapi.File{}, fmt.Errorf("%w: reauth required", driveapi.ErrUnauthenticated)
+}
+
+func TestWorkerMarksUnauthenticatedMutationAsRetryableAuthorizationRequired(t *testing.T) {
+	ctx, metadata, _, drive, _ := newWorkerFixture(t)
+	object := addRemoteFile(t, ctx, metadata, drive, "remote-auth", "doc.txt", []byte("hi"), "v1")
+	if _, err := metadata.QueueRename(ctx, domain.RootObjectID, "doc.txt", domain.RootObjectID, "doc2.txt", false); err != nil {
+		t.Fatal(err)
+	}
+	content, err := store.NewContentStore(metadata, filepath.Join(t.TempDir(), "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(metadata, content, unauthUpdateDrive{memoryDrive: drive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worked, runErr := worker.RunOne(ctx)
+	if !worked || !errors.Is(runErr, driveapi.ErrUnauthenticated) {
+		t.Fatalf("worked=%v err=%v, want ErrUnauthenticated", worked, runErr)
+	}
+	ops, err := metadata.OperationsForObject(ctx, object.ID)
+	if err != nil || len(ops) != 1 {
+		t.Fatalf("ops = %#v err=%v", ops, err)
+	}
+	if ops[0].State != domain.OperationRetryableError || ops[0].LastErrorCode != "authorization_required" {
+		t.Fatalf("op state = %#v, want retryable-error / authorization_required", ops[0])
+	}
+}
+
 func TestWorkerAdvancesBaseVersionAcrossQueuedLocalWrites(t *testing.T) {
 	ctx, metadata, content, drive, worker := newWorkerFixture(t)
 	object := addRemoteFile(t, ctx, metadata, drive, "remote-sequence", "sequence.txt", []byte("base"), "v1")

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google-drive-linux/internal/auth"
 )
 
 const (
@@ -530,13 +532,14 @@ func (c *Client) perform(ctx context.Context, spec requestSpec) (*http.Response,
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}
-			if spec.retrySafe && attempt < c.maxAttempts {
+			classified, retryable := classifyTransportError(requestErr)
+			if retryable && spec.retrySafe && attempt < c.maxAttempts {
 				if err := c.waitBeforeRetry(ctx, attempt, 0); err != nil {
 					return nil, nil, err
 				}
 				continue
 			}
-			return nil, nil, ErrTemporary
+			return nil, nil, classified
 		}
 		cleanup := sync.OnceFunc(func() {
 			_ = response.Body.Close()
@@ -670,6 +673,21 @@ func retryAfter(value string, now time.Time) time.Duration {
 		return parsed.Sub(now)
 	}
 	return 0
+}
+
+func classifyTransportError(requestErr error) (error, bool) {
+	switch {
+	case errors.Is(requestErr, auth.ErrReauthorizationRequired):
+		return fmt.Errorf("%w: %w", ErrUnauthenticated, auth.ErrReauthorizationRequired), false
+	case errors.Is(requestErr, auth.ErrNotAuthenticated):
+		return fmt.Errorf("%w: %w", ErrUnauthenticated, auth.ErrNotAuthenticated), false
+	case errors.Is(requestErr, auth.ErrCredentialStore):
+		return fmt.Errorf("%w: %w", ErrTemporary, auth.ErrCredentialStore), false
+	case errors.Is(requestErr, auth.ErrTokenRefresh):
+		return fmt.Errorf("%w: %w", ErrTemporary, auth.ErrTokenRefresh), true
+	default:
+		return ErrTemporary, true
+	}
 }
 
 func ctxOrTemporary(ctx context.Context) error {
