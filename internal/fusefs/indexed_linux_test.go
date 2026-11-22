@@ -375,6 +375,34 @@ func TestWorkspaceLinkUsesAllowedGoogleURL(t *testing.T) {
 	}
 }
 
+func TestIndexedNodeStatfsReportsPOSIXNameLimitAndBackingSpace(t *testing.T) {
+	metadata := openIndexedTestStore(t, 1)
+	defer metadata.Close()
+	root, err := NewIndexedRoot(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out fuse.StatfsOut
+	if errno := root.Statfs(context.Background(), &out); errno != 0 {
+		t.Fatalf("Statfs errno = %v", errno)
+	}
+	if out.NameLen != 255 || out.Bsize == 0 || out.Frsize == 0 || out.Blocks == 0 {
+		t.Fatalf("Statfs output = %+v, want NameLen=255 and non-zero block metrics", out)
+	}
+
+	var fallbackOut fuse.StatfsOut
+	if errno := (&IndexedNode{}).Statfs(context.Background(), &fallbackOut); errno != 0 {
+		t.Fatalf("fallback Statfs errno = %v", errno)
+	}
+	if fallbackOut.NameLen != 255 || fallbackOut.Bsize != 4096 || fallbackOut.Frsize != 4096 {
+		t.Fatalf("fallback Statfs output = %+v", fallbackOut)
+	}
+
+	if errno := root.Statfs(context.Background(), nil); errno != syscall.EINVAL {
+		t.Fatalf("Statfs(nil) errno = %v, want EINVAL", errno)
+	}
+}
+
 func openIndexedTestStore(t *testing.T, count int) *store.Store {
 	t.Helper()
 	metadata, err := store.Open(t.TempDir() + "/metadata.db")

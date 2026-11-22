@@ -68,6 +68,7 @@ var (
 	_ fs.NodeUnlinker  = (*IndexedNode)(nil)
 	_ fs.NodeRmdirer   = (*IndexedNode)(nil)
 	_ fs.NodeRenamer   = (*IndexedNode)(nil)
+	_ fs.NodeStatfser  = (*IndexedNode)(nil)
 )
 
 func NewIndexedRoot(metadata *store.Store) (*IndexedNode, error) {
@@ -614,6 +615,28 @@ func (n *IndexedNode) Rename(ctx context.Context, oldName string, newParent fs.I
 	}
 	_, err = n.metadata.QueueRename(ctx, oldParentObject.ID, oldName, newParentObject.ID, newName, flags&uint32(unix.RENAME_NOREPLACE) != 0)
 	return errnoForError(err)
+}
+
+func (n *IndexedNode) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	if out == nil {
+		return syscall.EINVAL
+	}
+	if n.metadata != nil && n.metadata.Path() != "" {
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(filepath.Dir(n.metadata.Path()), &stat); err == nil {
+			out.FromStatfsT(&stat)
+		}
+	}
+	if out.Bsize == 0 {
+		out.Bsize = 4096
+	}
+	if out.Frsize == 0 {
+		out.Frsize = out.Bsize
+	}
+	if out.NameLen == 0 || out.NameLen > 255 {
+		out.NameLen = 255
+	}
+	return 0
 }
 
 func (n *IndexedNode) object(ctx context.Context) (domain.Object, syscall.Errno) {
