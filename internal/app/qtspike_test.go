@@ -1,10 +1,12 @@
 package app
 
 import (
+	"encoding/xml"
 	"strings"
 	"testing"
 	"time"
 
+	"google-drive-linux/assets"
 	"google-drive-linux/internal/domain"
 	"google-drive-linux/internal/drivecontrol"
 	"google-drive-linux/internal/store"
@@ -123,5 +125,40 @@ func TestConflictCardFormattingTabTitleAndSignature(t *testing.T) {
 	modified[0].RemoteVersion = "3"
 	if sigBase == conflictViewSignature(modified, nil, nil) {
 		t.Fatal("conflictViewSignature ignored conflict record changes")
+	}
+}
+
+func TestAppIconSVGAsset(t *testing.T) {
+	var svg struct {
+		XMLName xml.Name `xml:"svg"`
+		Width   string   `xml:"width,attr"`
+		Height  string   `xml:"height,attr"`
+		ViewBox string   `xml:"viewBox,attr"`
+		Paths   []struct {
+			Fill string `xml:"fill,attr"`
+			D    string `xml:"d,attr"`
+		} `xml:"path"`
+	}
+	if err := xml.Unmarshal(assets.AppIconSVG, &svg); err != nil {
+		t.Fatalf("failed to parse embedded app icon SVG: %v", err)
+	}
+	if svg.XMLName.Local != "svg" {
+		t.Fatalf("root element = %q, want svg", svg.XMLName.Local)
+	}
+	if svg.Width != "128" || svg.Height != "128" || svg.ViewBox != "0 0 128 128" {
+		t.Fatalf("unexpected SVG dimensions width=%q height=%q viewBox=%q", svg.Width, svg.Height, svg.ViewBox)
+	}
+
+	wantFills := []string{"#00ac47", "#ffba00", "#2684fc", "#00832d", "#0066da", "#ea4335"}
+	if len(svg.Paths) != len(wantFills) {
+		t.Fatalf("got %d paths, want %d", len(svg.Paths), len(wantFills))
+	}
+	for i, wantFill := range wantFills {
+		if svg.Paths[i].Fill != wantFill {
+			t.Fatalf("path[%d].Fill = %q, want %q", i, svg.Paths[i].Fill, wantFill)
+		}
+		if strings.TrimSpace(svg.Paths[i].D) == "" {
+			t.Fatalf("path[%d].D is empty", i)
+		}
 	}
 }

@@ -55,6 +55,9 @@ func RunQtApp(smoke bool, socketPath string) int {
 	defer runtime.UnlockOSThread()
 	application := qt.NewQApplication([]string{"driveapp"})
 	_ = application
+	qt.QGuiApplication_SetDesktopFileName("google-drive-linux")
+	appIcon, appIconFromSVG := loadAppIcon()
+	qt.QGuiApplication_SetWindowIcon(appIcon)
 
 	initialStatus := "drivefs service is running"
 	if startupError != "" {
@@ -143,6 +146,7 @@ func RunQtApp(smoke bool, socketPath string) int {
 
 	window := qt.NewQWidget2()
 	window.SetWindowTitle("Google Drive for Linux")
+	window.SetWindowIcon(appIcon)
 	window.Resize(760, 560)
 	tabs := qt.NewQTabWidget2()
 
@@ -305,8 +309,7 @@ func RunQtApp(smoke bool, socketPath string) int {
 	windowLayout := qt.NewQVBoxLayout(window)
 	windowLayout.AddWidget(tabs.QWidget)
 
-	icon := qt.QApplication_Style().StandardIcon(qt.QStyle__SP_DriveNetIcon, nil, nil)
-	tray := qt.NewQSystemTrayIcon2(icon)
+	tray := qt.NewQSystemTrayIcon2(appIcon)
 	tray.SetToolTip("Google Drive for Linux")
 	menu := qt.NewQMenu2()
 	showAction := qt.NewQAction2("Open window")
@@ -485,6 +488,13 @@ func RunQtApp(smoke bool, socketPath string) int {
 		fmt.Println("Qt system tray is unavailable; the main window remains available")
 	}
 	qt.QApplication_Exec()
+	if smoke && (appIcon == nil || appIcon.IsNull()) {
+		fmt.Println("application icon could not be loaded")
+		return 1
+	}
+	if smoke && !appIconFromSVG {
+		fmt.Println("warning: embedded SVG icon could not be rasterized; using fallback icon")
+	}
 	if smoke && !updated {
 		fmt.Println("background state was not delivered through the Qt event loop")
 		return 1
