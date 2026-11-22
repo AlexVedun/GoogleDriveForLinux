@@ -4,11 +4,11 @@ Go and Qt 6 desktop client that mounts a user's Google Drive **My Drive** folder
 
 The product is at the prototype stage. The per-user service and Qt client now share OAuth, initial and incremental indexing, a bounded content cache, durable queued writes, resumable uploads, offline pin downloads, conflict status, and a writable FUSE mount. The GUI can sign in, mount/unmount, show the queue and conflicts, manage pins, change the cache limit, and quit the service. See [the product plan](plan-google-drive-linux-go-qt.md) and [the implementation plan](LUNA_IMPLEMENTATION_PLAN.md).
 
-The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md); unresolved technical choices are tracked in [docs/decisions.md](docs/decisions.md).
+The FUSE and sync behavior contract is in [docs/semantics.md](docs/semantics.md).
 
 OAuth setup, Secret Service requirements, and sign-in behavior are documented in [docs/oauth.md](docs/oauth.md).
 
-The [operating guide](docs/operating-guide.md) covers installation, FUSE and Secret Service requirements, local data paths, recovery, sign-out, and safe removal. The [release readiness record](docs/release-readiness.md) lists what passed locally and what still needs a real desktop, Google account, and FUSE mount.
+The [operating guide](docs/operating-guide.md) covers installation, FUSE and Secret Service requirements, local data paths, recovery, sign-out, and safe removal.
 
 Drive API error categories and retry policy are documented in [docs/drive-api-errors.md](docs/drive-api-errors.md).
 
